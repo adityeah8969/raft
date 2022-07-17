@@ -14,12 +14,15 @@ type Server struct {
 	votedFor        string
 	lastCommitIndex int
 	lastApplied     int
-
 	// next log entry to send to servers
 	nextIndex []int
 	// index of the highest log entry known to be replicated on server
 	matchIndex []int
-
-	logs         []logEntry.LogEntry // check if this can be made an interface
+	// check if this can be made an interface
+	logs         []logEntry.LogEntry
 	stateMachine stateMachine.StateMachine
 }
+
+// Read config and then create a server
+// stateMC from config -> will affect the logEntry type
+//

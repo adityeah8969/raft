@@ -1,10 +1,7 @@
 package types
 
-import (
-	"github.com/adityeah8969/raft/types/command"
-)
+import "github.com/adityeah8969/raft/types/logEntry"
 
 type ClientRequest struct {
-	stateMachineType string
-	command          command.Command
+	entry logEntry.Entry
 }

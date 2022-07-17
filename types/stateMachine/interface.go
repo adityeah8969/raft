@@ -1,9 +1,10 @@
 package stateMachine
 
-import "github.com/adityeah8969/raft/types/command"
+import (
+	"github.com/adityeah8969/raft/types/logEntry"
+)
 
 type StateMachine interface {
-	GetType() string
-	Apply(command command.Command) error
-	Validate(command command.Command) bool
+	Apply(entry logEntry.Entry) error
+	GetEntry(entry logEntry.Entry) (logEntry.Entry, error)
 }

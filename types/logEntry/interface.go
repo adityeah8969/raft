@@ -1,9 +1,9 @@
 package logEntry
 
-import "github.com/adityeah8969/raft/types/command"
+type Entry interface{}
 
 type LogEntry interface {
 	GetTerm() int
-	GetCommand() command.Command
 	GetIndex() int
+	GetEntry() Entry
 }
