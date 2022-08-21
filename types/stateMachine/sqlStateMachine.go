@@ -1,6 +1,7 @@
 package stateMachine
 
 import (
+	"errors"
 	"log"
 	"sync"
 
@@ -47,27 +48,30 @@ func GetSqlStateMachineInstance() (*SqlStateMachine, error) {
 	return sqlStateMachineInstance, nil
 }
 
+// check if this is needed
 func (sm *SqlStateMachine) GetMachineType() MachineType {
 	return sm.stateMachineType
 }
 
-// write the apply query
-// keep in ming that term + index comes in the parameter entry, from the server.
-func (sm *SqlStateMachine) Apply(entry logEntry.Entry) error {
-	// stateMcLog := entry.(*logEntry.SqlStateMcLog)
-
-	// res := sm.db.Model(&sm.stateMachineType).Where("key = ?", stateMcLog.Key).Updates(stateMcLog)
-
-	// return sm.db.Model(&sm.stateMachineType).Where("key = ?", sqlData.Key).Update("val", sqlData.Val).Error
-
-	return nil
+func (sm *SqlStateMachine) Apply(entry logEntry.Entry, currTerm int, index int) error {
+	sqlData, ok := entry.(*logEntry.SqlData)
+	if !ok {
+		return errors.New("cannot marshal entry to sql data")
+	}
+	stateMcLog := &logEntry.SqlStateMcLog{
+		Term:    currTerm,
+		Index:   index,
+		SqlData: sqlData,
+	}
+	return sm.db.Model(&logEntry.SqlStateMcLog{}).Create(stateMcLog).Error
 }
 
+// Fetching the last (latest) entry from the state machine, for a given key.
 func (sm *SqlStateMachine) GetEntry(entry logEntry.Entry) (logEntry.Entry, error) {
 	entryRequest := entry.(*logEntry.SqlData)
 	key := entryRequest.Key
-	var entryResponse logEntry.SqlData
-	err := sm.db.Model(&sm.stateMachineType).Where("key = ?", key).First(&entryResponse).Error
+	var entryResponse logEntry.SqlStateMcLog
+	err := sm.db.Model(&logEntry.SqlStateMcLog{}).Where("key = ?", key).Last(&entryResponse).Error
 	if err != nil {
 		return nil, err
 	}

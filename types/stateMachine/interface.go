@@ -5,6 +5,6 @@ import (
 )
 
 type StateMachine interface {
-	Apply(entry logEntry.Entry) error
+	Apply(entry logEntry.Entry, currTerm int, index int) error
 	GetEntry(entry logEntry.Entry) (logEntry.Entry, error)
 }

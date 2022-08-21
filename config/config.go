@@ -20,8 +20,8 @@ func init() {
 
 	viper.SetConfigName(configFileName)
 	viper.AddConfigPath(configFilePath)
-	// viper.AutomaticEnv()
 	viper.SetConfigType(configFileType)
+	// viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {
 		fmt.Printf("Error reading config file, %s", err)
@@ -34,8 +34,16 @@ func init() {
 }
 
 type Config struct {
-	StateMachineType string
-	Sql              SqlConfig
+	stateMachineType   string
+	stateMachineConfig StateMachineConfig
+}
+
+type StateMachineConfig struct {
+	sql Sql
+}
+
+type Sql struct {
+	sqlConfig SqlConfig
 }
 
 type SqlConfig struct {
@@ -46,10 +54,6 @@ type SqliteConfig struct {
 	SrcFileName string
 }
 
-func GetStateMachineType() string {
-	return configuration.StateMachineType
-}
-
-func GetSqliteSrcFileName() string {
-	return configuration.Sql.Sqlite.SrcFileName
+func GetStateMcConfig() Config {
+	return configuration
 }

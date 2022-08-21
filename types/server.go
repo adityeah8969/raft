@@ -5,6 +5,12 @@ import (
 	"github.com/adityeah8969/raft/types/stateMachine"
 )
 
+var serverInstancve Server
+
+func init() {
+
+}
+
 type Server struct {
 	serverId        string
 	leaderId        string
@@ -19,10 +25,9 @@ type Server struct {
 	// index of the highest log entry known to be replicated on server
 	matchIndex []int
 	// check if this can be made an interface
-	logs         []logEntry.LogEntry
+	logs         []logEntry.Entry
 	stateMachine stateMachine.StateMachine
 }
 
 // Read config and then create a server
-// stateMC from config -> will affect the logEntry type
-//
+// stateMC will be decided by the config
