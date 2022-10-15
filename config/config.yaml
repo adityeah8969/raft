@@ -1,4 +1,3 @@
-stateMachineType: SQL
-stateMachineConfig: 
-  sqlite:
-    srcFileName: "/tmp/raft.db"
+StateMachineType: sqlite
+StateMachineConfig:
+  SrcFileName: "/tmp/raft.db"

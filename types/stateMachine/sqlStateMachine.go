@@ -14,43 +14,31 @@ import (
 )
 
 var lock = &sync.Mutex{}
-var sqlStateMachineInstance *SqlStateMachine
 var sqliteDB *gorm.DB
 
 type SqlStateMachine struct {
-	stateMachineType MachineType
-	db               *gorm.DB
+	db *gorm.DB
 }
 
-func init() {
-	var err error
-	sqliteDB, err = gorm.Open(sqlite.Open(config.GetSqliteSrcFileName()), &gorm.Config{})
-	if err != nil {
-		log.Fatal("initializing db session: ", err)
-	}
-	sqliteDB.AutoMigrate(&logEntry.SqlStateMcLog{})
-}
-
-func GetSqlStateMachineInstance() (*SqlStateMachine, error) {
-	if sqlStateMachineInstance == nil {
+func (sm *SqlStateMachine) GetStateMachineInstance() StateMachine {
+	if sm == nil {
 		lock.Lock()
 		defer lock.Unlock()
-		if sqlStateMachineInstance == nil {
-			sqlStateMachineInstance = &SqlStateMachine{
-				stateMachineType: MachineType(config.GetStateMachineType()),
-				db:               sqliteDB,
+		if sm == nil {
+			sqliteDB, err := getSqliteDbDetails()
+			if err != nil {
+				log.Fatal("initializing sqlite db: ", err)
 			}
-			return sqlStateMachineInstance, nil
+			sqliteDB.AutoMigrate(&logEntry.SqlStateMcLog{})
+			sm = &SqlStateMachine{
+				db: sqliteDB,
+			}
+			return sm
 		} else {
-			return sqlStateMachineInstance, nil
+			return sm
 		}
 	}
-	return sqlStateMachineInstance, nil
-}
-
-// check if this is needed
-func (sm *SqlStateMachine) GetMachineType() MachineType {
-	return sm.stateMachineType
+	return sm
 }
 
 func (sm *SqlStateMachine) Apply(entry logEntry.Entry, currTerm int, index int) error {
@@ -76,4 +64,19 @@ func (sm *SqlStateMachine) GetEntry(entry logEntry.Entry) (logEntry.Entry, error
 		return nil, err
 	}
 	return &entryResponse, nil
+}
+
+func getSqliteDbDetails() (*gorm.DB, error) {
+	stateMachineConfig, err := config.GetStateMachineConfig()
+	if err != nil {
+		return nil, err
+	}
+	var sqliteConfig config.SqliteConfig
+	sqliteConfig.LoadConfig(stateMachineConfig)
+	srcFile := sqliteConfig.GetSrcFile()
+	sqliteDB, err = gorm.Open(sqlite.Open(srcFile), &gorm.Config{})
+	if err != nil {
+		return nil, err
+	}
+	return sqliteDB, nil
 }
