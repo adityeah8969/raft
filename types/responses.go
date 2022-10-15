@@ -5,3 +5,9 @@ type ServerResponse struct {
 	success  bool
 	data     interface{}
 }
+
+type ResponseVoteRPC struct {
+	Voted         bool
+	OutdatedTerm  bool
+	CurrentLeader string
+}

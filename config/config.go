@@ -15,8 +15,14 @@ const (
 
 // check if the memebers can be made private
 type Config struct {
-	StateMachineType   string      `mapstructure:"StateMachineType"`
-	StateMachineConfig interface{} `mapstructure:"StateMachineConfig"`
+	StateMachineType            string      `mapstructure:"StateMachineType"`
+	StateMachineConfig          interface{} `mapstructure:"StateMachineConfig"`
+	ServerDbType                string      `mapstructure:"ServerDbType"`
+	ServerDBConfig              interface{} `mapstructure:"ServerDbConfig"`
+	ServerId                    string      `mapstructure:"ServerId"`
+	Peers                       []string    `mapstructure:"Peers"`
+	TickerIntervalInMiliseconds int         `mapstructure:"TickerIntervalInMiliseconds"`
+	RetryRPCLimit               int         `mapstructure:"RetryRPCLimit"`
 }
 
 var config Config
@@ -45,11 +51,42 @@ func GetStateMachineConfig() ([]byte, error) {
 	return bytes, nil
 }
 
-// len == 0 check
+func GetServerDbConfig() ([]byte, error) {
+	bytes, err := json.Marshal(config.ServerDBConfig)
+	if err != nil {
+		return nil, err
+	}
+	return bytes, nil
+}
+
 func GetStateMachineType() string {
 	return config.StateMachineType
 }
 
+func GetServerId() string {
+	return config.ServerId
+}
+
+func GetPeers() []string {
+	return config.Peers
+}
+
+func GetServerDbType() string {
+	return config.ServerDbType
+}
+
+func GetTickerIntervalInMillisecond() int {
+	return config.TickerIntervalInMiliseconds
+}
+
+func GetRetryRPCLimit() int {
+	return config.RetryRPCLimit
+}
+
 type StateMachineConfig interface {
 	LoadConfig(bytes []byte) (StateMachineConfig, error)
+}
+
+type ServerDBConfig interface {
+	LoadConfig(bytes []byte) (ServerDBConfig, error)
 }

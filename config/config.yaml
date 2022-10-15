@@ -1,3 +1,10 @@
 StateMachineType: sqlite
 StateMachineConfig:
-  SrcFileName: "/tmp/raft.db"
+  SrcFileName: "/tmp/statemc.db"
+ServerId: server1
+ServerDbType: sqlite
+ServerDbConfig:
+  SrcFileName: "/tmp/server.db"
+Peers: ['server2', 'server3', 'server4', 'server5']
+TickerIntervalInMiliseconds: 150
+RetryRPCLimit: 5

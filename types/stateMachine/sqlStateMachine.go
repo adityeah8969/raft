@@ -16,11 +16,11 @@ import (
 var lock = &sync.Mutex{}
 var sqliteDB *gorm.DB
 
-type SqlStateMachine struct {
+type SqliteStateMachine struct {
 	db *gorm.DB
 }
 
-func (sm *SqlStateMachine) GetStateMachineInstance() StateMachine {
+func (sm *SqliteStateMachine) GetStateMachineInstance() StateMachine {
 	if sm == nil {
 		lock.Lock()
 		defer lock.Unlock()
@@ -29,8 +29,8 @@ func (sm *SqlStateMachine) GetStateMachineInstance() StateMachine {
 			if err != nil {
 				log.Fatal("initializing sqlite db: ", err)
 			}
-			sqliteDB.AutoMigrate(&logEntry.SqlStateMcLog{})
-			sm = &SqlStateMachine{
+			sqliteDB.AutoMigrate(&logEntry.SqliteStateMcLog{})
+			sm = &SqliteStateMachine{
 				db: sqliteDB,
 			}
 			return sm
@@ -41,25 +41,25 @@ func (sm *SqlStateMachine) GetStateMachineInstance() StateMachine {
 	return sm
 }
 
-func (sm *SqlStateMachine) Apply(entry logEntry.Entry, currTerm int, index int) error {
+func (sm *SqliteStateMachine) Apply(entry logEntry.Entry, currTerm int, index int) error {
 	sqlData, ok := entry.(*logEntry.SqlData)
 	if !ok {
 		return errors.New("cannot marshal entry to sql data")
 	}
-	stateMcLog := &logEntry.SqlStateMcLog{
+	stateMcLog := &logEntry.SqliteStateMcLog{
 		Term:    currTerm,
 		Index:   index,
 		SqlData: sqlData,
 	}
-	return sm.db.Model(&logEntry.SqlStateMcLog{}).Create(stateMcLog).Error
+	return sm.db.Model(&logEntry.SqliteStateMcLog{}).Create(stateMcLog).Error
 }
 
 // Fetching the last (latest) entry from the state machine, for a given key.
-func (sm *SqlStateMachine) GetEntry(entry logEntry.Entry) (logEntry.Entry, error) {
+func (sm *SqliteStateMachine) GetEntry(entry logEntry.Entry) (logEntry.Entry, error) {
 	entryRequest := entry.(*logEntry.SqlData)
 	key := entryRequest.Key
-	var entryResponse logEntry.SqlStateMcLog
-	err := sm.db.Model(&logEntry.SqlStateMcLog{}).Where("key = ?", key).Last(&entryResponse).Error
+	var entryResponse logEntry.SqliteStateMcLog
+	err := sm.db.Model(&logEntry.SqliteStateMcLog{}).Where("key = ?", key).Last(&entryResponse).Error
 	if err != nil {
 		return nil, err
 	}

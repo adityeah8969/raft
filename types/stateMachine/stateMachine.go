@@ -1,7 +1,7 @@
 package stateMachine
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types/constants"
@@ -11,8 +11,8 @@ func GetStateMachine() (StateMachine, error) {
 	stateMachinetype := config.GetStateMachineType()
 	switch stateMachinetype {
 	case string(constants.Sqlite):
-		var sqlStateMachine SqlStateMachine
+		var sqlStateMachine SqliteStateMachine
 		return sqlStateMachine.GetStateMachineInstance(), nil
 	}
-	return nil, errors.New("incompatible state machine type")
+	return nil, fmt.Errorf("incompatible state machine type %q", stateMachinetype)
 }

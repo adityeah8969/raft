@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 type SqliteConfig struct {
@@ -12,7 +11,7 @@ type SqliteConfig struct {
 func (s *SqliteConfig) LoadConfig(bytes []byte) (StateMachineConfig, error) {
 	var sqliteConfig SqliteConfig
 	if err := json.Unmarshal(bytes, &sqliteConfig); err != nil {
-		fmt.Printf("unmarshalling: %v\n", err)
+		return nil, err
 	}
 	return &sqliteConfig, nil
 }

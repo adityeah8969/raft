@@ -2,7 +2,7 @@ package logEntry
 
 import "gorm.io/gorm"
 
-type SqlStateMcLog struct {
+type SqliteStateMcLog struct {
 	gorm.Model
 	Term    int
 	Index   int
