@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"context"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -101,6 +103,13 @@ type Server struct {
 	serverTicker *ServerTicker
 }
 
+var mu = &sync.Mutex{}
+
+type electionContext struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
 func StartServing() error {
 	rpc.Register(serverInstance)
 	rpc.HandleHTTP()
@@ -113,6 +122,9 @@ func StartServing() error {
 	return err
 }
 
+// heartbeat (AppendEntry messages in general) stopping the leaderELection process
+// heartbeat messages restarting timeout tickers
+
 func (s *Server) startTicker() {
 	defer s.serverTicker.ticker.Stop()
 	for {
@@ -122,8 +134,18 @@ func (s *Server) startTicker() {
 			return
 		case t := <-s.serverTicker.ticker.C:
 			sugar.Infof("election started by %s at %v", s.serverId, t)
+			mu.Lock()
+			ctx, cancel := context.WithCancel(context.Background())
+			mu.Unlock()
+
+			electionContextInst := &electionContext{
+				ctx:    ctx,
+				cancel: cancel,
+			}
+
 			// start election here
 			// context can be used to stop the ongoiong election if need be
+			go s.LeaderElection(electionContextInst)
 			interval := s.serverTicker.tickerInterval
 			s.serverTicker.ticker.Reset(time.Duration(util.GetRandomInt(interval, 2*interval) * int(time.Millisecond)))
 
@@ -134,66 +156,87 @@ func (s *Server) startTicker() {
 // Sends out RequestVote RPCs to other servers. Requests may timeout here, keep retrying. On failure go back to previous step and start all over again.
 // On receving majority, the candidate becomes a leader.
 // On receving heartbeat from some other newly elected leader, the candidate becomes a follower.
-func (s *Server) LeaderElection() error {
+func (s *Server) LeaderElection(electionContextInst *electionContext) error {
+	for {
+		select {
+		case <-electionContextInst.ctx.Done():
+			// log here
+			return nil
+		default:
 
-	// # Candidate incerements its term.
-	// # Votes for itself. (persists)
-	s.currentTerm++
-	vote := &Vote{
-		votedFor: s.serverId,
-		term:     s.currentTerm,
-	}
-	err := s.serverDb.Model(&Vote{}).Save(vote).Error
-	if err != nil {
-		return err
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(len(s.peers))
-
-	responseChan := make(chan *types.ResponseVoteRPC, len(s.peers))
-
-	for _, clientI := range s.rpcClients {
-
-		go func() {
-			defer wg.Done()
-			client := clientI.(*rpc.Client)
-			request := &types.RequestVoteRPC{
-				Term:     s.currentTerm,
-				ServerId: s.serverId,
+			// # Candidate incerements its term.
+			// # Votes for itself. (persists)
+			s.currentTerm++
+			vote := &Vote{
+				votedFor: s.serverId,
+				term:     s.currentTerm,
 			}
-			response := &types.ResponseVoteRPC{}
-			err = util.RPCWithRetry(client, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit())
+			err := s.serverDb.Model(&Vote{}).Save(vote).Error
 			if err != nil {
-				sugar.Warnw("request vote RPC failed after retries", "rpcClient", client, "request", request, "response", response)
-				response = &types.ResponseVoteRPC{
-					Voted: false,
+				return err
+			}
+			s.votedFor = s.serverId
+
+			var wg sync.WaitGroup
+			wg.Add(len(s.peers))
+
+			responseChan := make(chan *types.ResponseVoteRPC, len(s.peers))
+
+			for i := range s.rpcClients {
+				go func() {
+					defer wg.Done()
+					client := s.rpcClients[i].(*rpc.Client)
+					request := &types.RequestVoteRPC{
+						Term:     s.currentTerm,
+						ServerId: s.serverId,
+					}
+					response := &types.ResponseVoteRPC{}
+					err = util.RPCWithRetry(client, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit())
+					if err != nil {
+						sugar.Warnw("request vote RPC failed after retries", "rpcClient", client, "request", request, "response", response)
+						response = &types.ResponseVoteRPC{
+							Voted: false,
+						}
+					}
+					responseChan <- response
+				}()
+
+			}
+			wg.Wait()
+
+			voteCnt := 0
+			isTermOutdated := false
+			for resp := range responseChan {
+				if resp.Voted {
+					voteCnt++
+					continue
+				}
+				if resp.OutdatedTerm {
+					s.state = string(constants.Follower)
+					s.leaderId = resp.CurrentLeader
+					isTermOutdated = true
+					break
 				}
 			}
-			responseChan <- response
-		}()
+			close(responseChan)
+			if isTermOutdated {
+				sugar.Infof("%s server had an outdated term as a candidate", s.serverId)
+				return nil
+			}
 
-	}
-	wg.Wait()
+			if voteCnt >= int(math.Ceil(1.0*float64(len(s.peers)/2))) {
+				s.leaderId = s.serverId
+				s.state = string(constants.Leader)
+			}
 
-	voteCnt := 0
-	for resp := range responseChan {
-		if resp.Voted {
-			voteCnt++
-			continue
-		}
-		if resp.OutdatedTerm {
-			s.state = string(constants.Follower)
-			s.leaderId = resp.CurrentLeader
 		}
 	}
-
 }
 
-func (s *Server) RequestVoteRPC(requestVoteRPC *types.RequestVoteRPC, responseVoteRPC *types.ResponseVoteRPC) {
+func (s *Server) RequestVoteRPC(request *types.RequestVoteRPC, response *types.ResponseVoteRPC) {
 	// 	Notify that the requesting candidate should step back.
-	if s.currentTerm > requestVoteRPC.Term {
-		responseVoteRPC = &types.ResponseVoteRPC{
+	if s.currentTerm > request.Term {
+		response = &types.ResponseVoteRPC{
 			Voted:         false,
 			OutdatedTerm:  true,
 			CurrentLeader: s.leaderId,
@@ -201,17 +244,41 @@ func (s *Server) RequestVoteRPC(requestVoteRPC *types.RequestVoteRPC, responseVo
 		return
 	}
 	// 	do not vote for the requesting candidate
-	if s.currentTerm == requestVoteRPC.Term {
-		responseVoteRPC = &types.ResponseVoteRPC{
+	if s.currentTerm == request.Term {
+		response = &types.ResponseVoteRPC{
 			Voted: false,
 		}
 		return
 	}
 	// 	vote for the requesting candidate
-	if s.currentTerm < requestVoteRPC.Term {
-		responseVoteRPC = &types.ResponseVoteRPC{
+	if s.currentTerm < request.Term {
+		response = &types.ResponseVoteRPC{
 			Voted: true,
 		}
 		return
 	}
+}
+
+func (s *Server) AppendEntryRPC(request *types.RequestAppendEntryRPC, response *types.ResponseAppendEntryRPC) {
+
+	/// report outdated term in the request
+	if s.currentTerm > request.Term {
+		response = &types.ResponseAppendEntryRPC{
+			ServerId:      s.serverId,
+			Success:       true,
+			CurrentLeader: s.leaderId,
+			OutdatedTerm:  true,
+		}
+	}
+
+	if s.currentTerm == request.Term {
+		if len(request.Entries) == 0 {
+
+		}
+	}
+
+}
+
+func (s *Server) heartBeatTimerReset() {
+
 }

@@ -1,7 +1,6 @@
 package serverdb
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/adityeah8969/raft/config"
@@ -20,5 +19,5 @@ func GetServerDbInstance() (*gorm.DB, error) {
 		}
 		return db, nil
 	}
-	return nil, fmt.Errorf("incompatible server db type %q", serverDbType))
+	return nil, fmt.Errorf("incompatible server db type %q", serverDbType)
 }

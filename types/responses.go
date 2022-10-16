@@ -1,9 +1,11 @@
 package types
 
-type ServerResponse struct {
-	serverId string
-	success  bool
-	data     interface{}
+type ResponseAppendEntryRPC struct {
+	ServerId      string
+	Success       bool
+	OutdatedTerm  bool
+	CurrentLeader string
+	Data          interface{}
 }
 
 type ResponseVoteRPC struct {
