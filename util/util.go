@@ -3,6 +3,7 @@ package util
 import (
 	"math/rand"
 	"net/rpc"
+	"time"
 )
 
 func GetRandomInt(max int, min int) int {
@@ -18,4 +19,8 @@ func RPCWithRetry(client *rpc.Client, svcMethod string, request any, response an
 		}
 	}
 	return err
+}
+
+func GetRandomTickerDuration(interval int) time.Duration {
+	return time.Duration(GetRandomInt(interval, 2*interval) * int(time.Millisecond))
 }

@@ -25,6 +25,7 @@ import (
 var sqliteDB *gorm.DB
 var serverInstance *Server
 var sugar *zap.SugaredLogger
+var electionContextInst *electionContext
 
 // user sugar logger
 func init() {
@@ -64,7 +65,7 @@ func init() {
 		stateMachine: stateMcInst,
 		nextIndex:    nextIndex,
 		matchIndex:   matchIndex,
-		logs:         make([]logEntry.Entry, 0),
+		logs:         make([]serverLog, 0),
 		rpcClients:   rpcClients,
 		serverTicker: serverTicker,
 	}
@@ -84,23 +85,28 @@ type Vote struct {
 }
 
 type Server struct {
-	serverId        string
-	leaderId        string
-	peers           []string
-	rpcClients      map[string]interface{}
-	state           string
-	currentTerm     int
-	votedFor        string
-	lastCommitIndex int
-	lastApplied     int
+	serverId     string
+	leaderId     string
+	peers        []string
+	rpcClients   map[string]interface{}
+	state        string
+	currentTerm  int
+	votedFor     string
+	lastCommited entryIndex
+	lastApplied  entryIndex
 	// next log entry to send to servers
 	nextIndex []int
 	// index of the highest log entry known to be replicated on server
 	matchIndex   []int
-	logs         []logEntry.Entry
+	logs         []serverLog
 	stateMachine stateMachine.StateMachine
 	serverDb     *gorm.DB
 	serverTicker *ServerTicker
+}
+
+type entryIndex struct {
+	Term  int
+	Index int
 }
 
 var mu = &sync.Mutex{}
@@ -108,6 +114,17 @@ var mu = &sync.Mutex{}
 type electionContext struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+type serverLog struct {
+	Term        int
+	Index       int
+	ServerEntry logEntry.Entry
+}
+
+type serverEntry struct {
+	Key string `json:"key"`
+	Val string `json:"val"`
 }
 
 func StartServing() error {
@@ -124,7 +141,6 @@ func StartServing() error {
 
 // heartbeat (AppendEntry messages in general) stopping the leaderELection process
 // heartbeat messages restarting timeout tickers
-
 func (s *Server) startTicker() {
 	defer s.serverTicker.ticker.Stop()
 	for {
@@ -134,21 +150,24 @@ func (s *Server) startTicker() {
 			return
 		case t := <-s.serverTicker.ticker.C:
 			sugar.Infof("election started by %s at %v", s.serverId, t)
+			// separate it out
 			mu.Lock()
 			ctx, cancel := context.WithCancel(context.Background())
-			mu.Unlock()
-
-			electionContextInst := &electionContext{
+			electionContextInst = &electionContext{
 				ctx:    ctx,
 				cancel: cancel,
 			}
+			mu.Unlock()
 
 			// start election here
-			// context can be used to stop the ongoiong election if need be
-			go s.LeaderElection(electionContextInst)
-			interval := s.serverTicker.tickerInterval
-			s.serverTicker.ticker.Reset(time.Duration(util.GetRandomInt(interval, 2*interval) * int(time.Millisecond)))
+			// context can be used to stop the ongoing election if need be
+			go s.LeaderElection()
+			s.serverTicker.ticker.Reset(util.GetRandomTickerDuration(s.serverTicker.tickerInterval))
 
+			// separate it out
+			mu.Lock()
+			electionContextInst = nil
+			mu.Unlock()
 		}
 	}
 }
@@ -156,7 +175,7 @@ func (s *Server) startTicker() {
 // Sends out RequestVote RPCs to other servers. Requests may timeout here, keep retrying. On failure go back to previous step and start all over again.
 // On receving majority, the candidate becomes a leader.
 // On receving heartbeat from some other newly elected leader, the candidate becomes a follower.
-func (s *Server) LeaderElection(electionContextInst *electionContext) error {
+func (s *Server) LeaderElection() error {
 	for {
 		select {
 		case <-electionContextInst.ctx.Done():
@@ -200,7 +219,6 @@ func (s *Server) LeaderElection(electionContextInst *electionContext) error {
 					}
 					responseChan <- response
 				}()
-
 			}
 			wg.Wait()
 
@@ -233,10 +251,10 @@ func (s *Server) LeaderElection(electionContextInst *electionContext) error {
 	}
 }
 
-func (s *Server) RequestVoteRPC(request *types.RequestVoteRPC, response *types.ResponseVoteRPC) {
+func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVoteRPC) {
 	// 	Notify that the requesting candidate should step back.
-	if s.currentTerm > request.Term {
-		response = &types.ResponseVoteRPC{
+	if s.currentTerm > req.Term {
+		res = &types.ResponseVoteRPC{
 			Voted:         false,
 			OutdatedTerm:  true,
 			CurrentLeader: s.leaderId,
@@ -244,41 +262,129 @@ func (s *Server) RequestVoteRPC(request *types.RequestVoteRPC, response *types.R
 		return
 	}
 	// 	do not vote for the requesting candidate
-	if s.currentTerm == request.Term {
-		response = &types.ResponseVoteRPC{
+	if s.currentTerm == req.Term {
+		res = &types.ResponseVoteRPC{
 			Voted: false,
 		}
 		return
 	}
 	// 	vote for the requesting candidate
-	if s.currentTerm < request.Term {
-		response = &types.ResponseVoteRPC{
+	if s.currentTerm < req.Term {
+		res = &types.ResponseVoteRPC{
 			Voted: true,
 		}
 		return
 	}
 }
 
-func (s *Server) AppendEntryRPC(request *types.RequestAppendEntryRPC, response *types.ResponseAppendEntryRPC) {
+func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.ResponseAppendEntryRPC) {
 
-	/// report outdated term in the request
-	if s.currentTerm > request.Term {
-		response = &types.ResponseAppendEntryRPC{
+	if s.currentTerm == req.CurrentEntry.Term {
+		if req.CurrentEntry.Entry == nil {
+			go s.heartBeatTimerReset()
+			return
+		}
+
+		// return failure
+		ok := s.isPreviousEntryPresent(&req.PrevEntry)
+		if !ok {
+			res = &types.ResponseAppendEntryRPC{
+				ServerId:      s.serverId,
+				Success:       false,
+				OutdatedTerm:  false,
+				CurrentLeader: s.leaderId,
+			}
+			return
+		}
+
+		// commit
+		serverLog := serverLog{
+			Term:        req.CurrentEntry.Term,
+			Index:       req.CurrentEntry.Index,
+			ServerEntry: req.CurrentEntry.Index,
+		}
+		s.logs = append(s.logs, serverLog)
+
+		// apply entries to state m/c based on
+		s.applyEntriesToStateMC(&req.LastCommittedEntry)
+
+		// return success
+		res = &types.ResponseAppendEntryRPC{
 			ServerId:      s.serverId,
 			Success:       true,
+			OutdatedTerm:  false,
 			CurrentLeader: s.leaderId,
+		}
+	}
+
+	// report outdated term in the request
+	if s.currentTerm > req.CurrentEntry.Term {
+		res = &types.ResponseAppendEntryRPC{
+			ServerId:      s.serverId,
+			Success:       true,
 			OutdatedTerm:  true,
+			CurrentLeader: s.leaderId,
 		}
+		return
 	}
 
-	if s.currentTerm == request.Term {
-		if len(request.Entries) == 0 {
+	if s.currentTerm < req.CurrentEntry.Term {
 
+		// revert to being a follower
+		if s.state != string(constants.Follower) {
+			s.state = string(constants.Follower)
 		}
-	}
 
+		res = &types.ResponseAppendEntryRPC{
+			ServerId:      s.serverId,
+			Success:       false,
+			OutdatedTerm:  false,
+			CurrentLeader: s.leaderId,
+		}
+		return
+	}
 }
 
 func (s *Server) heartBeatTimerReset() {
+	mu.Lock()
+	defer mu.Unlock()
+	if electionContextInst != nil {
+		electionContextInst.cancel()
+		electionContextInst = nil
+	}
+	s.serverTicker.ticker.Reset(util.GetRandomTickerDuration(s.serverTicker.tickerInterval))
+}
 
+func (s *Server) isPreviousEntryPresent(prevEntry *types.RequestEntry) bool {
+
+	entryFound := false
+	index := 0
+
+	for i := len(s.logs) - 1; i >= 0; i-- {
+		if s.logs[i].Term < prevEntry.Term {
+			return false
+		}
+		if areEntriesSame(&s.logs[i], prevEntry) {
+			entryFound = true
+			index = i
+		}
+	}
+
+	if entryFound {
+		s.logs = s.logs[:index+1]
+	}
+
+	return false
+}
+
+func (s *Server) applyEntriesToStateMC(lastComittedEntryInLeader *types.RequestEntry) {
+}
+
+func areEntriesSame(a *serverLog, b *types.RequestEntry) bool {
+	if a.Term == b.Term && a.Index == b.Index {
+		entryA := a.ServerEntry.(serverEntry)
+		entryB := b.Entry.(serverEntry)
+		return entryA.Key == entryB.Key && entryA.Val == entryB.Val
+	}
+	return false
 }
