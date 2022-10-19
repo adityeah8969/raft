@@ -1,7 +1,5 @@
 package types
 
-import "github.com/adityeah8969/raft/types/logEntry"
-
 type RequestVoteRPC struct {
 	ServerId string
 	Term     int
@@ -9,13 +7,13 @@ type RequestVoteRPC struct {
 
 type RequestAppendEntryRPC struct {
 	LastCommitted      int
-	CurrentEntry       RequestEntry
-	PrevEntry          RequestEntry
-	LastCommittedEntry RequestEntry
+	CurrentEntry       LogEntry
+	PrevEntry          LogEntry
+	LastCommittedEntry LogEntry
 }
 
-type RequestEntry struct {
+type LogEntry struct {
 	Term  int
 	Index int
-	Entry logEntry.Entry
+	Entry interface{}
 }

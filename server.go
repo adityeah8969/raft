@@ -13,7 +13,6 @@ import (
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types"
 	"github.com/adityeah8969/raft/types/constants"
-	"github.com/adityeah8969/raft/types/logEntry"
 	"github.com/adityeah8969/raft/types/logger"
 	serverdb "github.com/adityeah8969/raft/types/serverDb"
 	"github.com/adityeah8969/raft/types/stateMachine"
@@ -22,7 +21,6 @@ import (
 	"gorm.io/gorm"
 )
 
-var sqliteDB *gorm.DB
 var serverInstance *Server
 var sugar *zap.SugaredLogger
 var electionContextInst *electionContext
@@ -65,7 +63,7 @@ func init() {
 		stateMachine: stateMcInst,
 		nextIndex:    nextIndex,
 		matchIndex:   matchIndex,
-		logs:         make([]serverLog, 0),
+		logs:         make([]types.LogEntry, 0),
 		rpcClients:   rpcClients,
 		serverTicker: serverTicker,
 	}
@@ -84,6 +82,7 @@ type Vote struct {
 	votedFor string
 }
 
+// see how the individual fields are getting impacted, at every imp logical step
 type Server struct {
 	serverId     string
 	leaderId     string
@@ -92,21 +91,16 @@ type Server struct {
 	state        string
 	currentTerm  int
 	votedFor     string
-	lastCommited entryIndex
-	lastApplied  entryIndex
+	lastCommited types.LogEntry
+	lastApplied  types.LogEntry
 	// next log entry to send to servers
 	nextIndex []int
 	// index of the highest log entry known to be replicated on server
 	matchIndex   []int
-	logs         []serverLog
+	logs         []types.LogEntry
 	stateMachine stateMachine.StateMachine
 	serverDb     *gorm.DB
 	serverTicker *ServerTicker
-}
-
-type entryIndex struct {
-	Term  int
-	Index int
 }
 
 var mu = &sync.Mutex{}
@@ -114,17 +108,6 @@ var mu = &sync.Mutex{}
 type electionContext struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-}
-
-type serverLog struct {
-	Term        int
-	Index       int
-	ServerEntry logEntry.Entry
-}
-
-type serverEntry struct {
-	Key string `json:"key"`
-	Val string `json:"val"`
 }
 
 func StartServing() error {
@@ -298,10 +281,10 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 		}
 
 		// commit
-		serverLog := serverLog{
-			Term:        req.CurrentEntry.Term,
-			Index:       req.CurrentEntry.Index,
-			ServerEntry: req.CurrentEntry.Index,
+		serverLog := types.LogEntry{
+			Term:  req.CurrentEntry.Term,
+			Index: req.CurrentEntry.Index,
+			Entry: req.CurrentEntry.Index,
 		}
 		s.logs = append(s.logs, serverLog)
 
@@ -355,7 +338,7 @@ func (s *Server) heartBeatTimerReset() {
 	s.serverTicker.ticker.Reset(util.GetRandomTickerDuration(s.serverTicker.tickerInterval))
 }
 
-func (s *Server) isPreviousEntryPresent(prevEntry *types.RequestEntry) bool {
+func (s *Server) isPreviousEntryPresent(prevEntry *types.LogEntry) bool {
 
 	entryFound := false
 	index := 0
@@ -364,7 +347,7 @@ func (s *Server) isPreviousEntryPresent(prevEntry *types.RequestEntry) bool {
 		if s.logs[i].Term < prevEntry.Term {
 			return false
 		}
-		if areEntriesSame(&s.logs[i], prevEntry) {
+		if s.logs[i] == *prevEntry {
 			entryFound = true
 			index = i
 		}
@@ -377,14 +360,6 @@ func (s *Server) isPreviousEntryPresent(prevEntry *types.RequestEntry) bool {
 	return false
 }
 
-func (s *Server) applyEntriesToStateMC(lastComittedEntryInLeader *types.RequestEntry) {
-}
+func (s *Server) applyEntriesToStateMC(lastComittedEntryInLeader *types.LogEntry) {
 
-func areEntriesSame(a *serverLog, b *types.RequestEntry) bool {
-	if a.Term == b.Term && a.Index == b.Index {
-		entryA := a.ServerEntry.(serverEntry)
-		entryB := b.Entry.(serverEntry)
-		return entryA.Key == entryB.Key && entryA.Val == entryB.Val
-	}
-	return false
 }
