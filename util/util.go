@@ -4,6 +4,8 @@ import (
 	"math/rand"
 	"net/rpc"
 	"time"
+
+	"github.com/adityeah8969/raft/types/logEntry"
 )
 
 func GetRandomInt(max int, min int) int {
@@ -23,4 +25,12 @@ func RPCWithRetry(client *rpc.Client, svcMethod string, request any, response an
 
 func GetRandomTickerDuration(interval int) time.Duration {
 	return time.Duration(GetRandomInt(interval, 2*interval) * int(time.Millisecond))
+}
+
+func GetReversedSlice(slice []logEntry.LogEntry) []logEntry.LogEntry {
+	revSlice := make([]logEntry.LogEntry, len(slice))
+	for i := len(slice) - 1; i >= 0; i-- {
+		revSlice = append(revSlice, slice[i])
+	}
+	return revSlice
 }

@@ -1,16 +1,35 @@
 package logEntry
 
-import "gorm.io/gorm"
+import (
+	"errors"
+
+	"gorm.io/gorm"
+)
 
 type SqliteStateMcLog struct {
 	gorm.Model
 	Term    int
 	Index   int
-	sqlData SqlData `gorm:"embedded"`
+	SqlData sqlData `gorm:"embedded"`
 }
 
 // key can be made a non-unique index here
-type SqlData struct {
+type sqlData struct {
 	Key string `json:"key"`
 	Val string `json:"val"`
+}
+
+func (s *SqliteStateMcLog) GetStateMcLogFromLogEntry(entry *LogEntry) error {
+
+	sqlData, ok := entry.Entry.(sqlData)
+	if !ok {
+		return errors.New("unable to cast into SqliteStateMcLog")
+	}
+
+	s = &SqliteStateMcLog{
+		Term:    entry.Term,
+		Index:   entry.Index,
+		SqlData: sqlData,
+	}
+	return nil
 }

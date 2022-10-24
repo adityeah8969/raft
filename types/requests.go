@@ -1,19 +1,23 @@
 package types
 
+import "github.com/adityeah8969/raft/types/logEntry"
+
 type RequestVoteRPC struct {
-	ServerId string
-	Term     int
+	CandidateId  string
+	Term         int
+	LastLogTerm  int
+	LastLogIndex int
 }
 
 type RequestAppendEntryRPC struct {
-	LastCommitted      int
-	CurrentEntry       LogEntry
-	PrevEntry          LogEntry
-	LastCommittedEntry LogEntry
+	LeaderTerm                 int
+	LeaderId                   string
+	PrevEntry                  logEntry.LogEntry
+	Entries                    []logEntry.LogEntry
+	LastCommittedEntryInLeader logEntry.LogEntry
 }
 
-type LogEntry struct {
-	Term  int
-	Index int
-	Entry interface{}
+type RequestEntry struct {
+	Key string `json:"key"`
+	Val string `json:"val"`
 }

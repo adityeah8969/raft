@@ -1,7 +1,6 @@
 package stateMachine
 
 import (
-	"errors"
 	"log"
 	"sync"
 
@@ -41,31 +40,6 @@ func (sm *SqliteStateMachine) GetStateMachineInstance() StateMachine {
 	return sm
 }
 
-func (sm *SqliteStateMachine) Apply(entry logEntry.Entry, currTerm int, index int) error {
-	sqlData, ok := entry.(*logEntry.SqlData)
-	if !ok {
-		return errors.New("cannot marshal entry to sql data")
-	}
-	stateMcLog := &logEntry.SqliteStateMcLog{
-		Term:    currTerm,
-		Index:   index,
-		SqlData: sqlData,
-	}
-	return sm.db.Model(&logEntry.SqliteStateMcLog{}).Create(stateMcLog).Error
-}
-
-// Fetching the last (latest) entry from the state machine, for a given key.
-func (sm *SqliteStateMachine) GetEntry(entry logEntry.Entry) (logEntry.Entry, error) {
-	entryRequest := entry.(*logEntry.SqlData)
-	key := entryRequest.Key
-	var entryResponse logEntry.SqliteStateMcLog
-	err := sm.db.Model(&logEntry.SqliteStateMcLog{}).Where("key = ?", key).Last(&entryResponse).Error
-	if err != nil {
-		return nil, err
-	}
-	return &entryResponse, nil
-}
-
 func getSqliteDbDetails() (*gorm.DB, error) {
 	stateMachineConfig, err := config.GetStateMachineConfig()
 	if err != nil {
@@ -79,4 +53,34 @@ func getSqliteDbDetails() (*gorm.DB, error) {
 		return nil, err
 	}
 	return sqliteDB, nil
+}
+
+func (sm *SqliteStateMachine) Apply(entries []logEntry.LogEntry) error {
+	stateMcLogs := make([]logEntry.SqliteStateMcLog, 0)
+	for _, entry := range entries {
+		stateMcLog := logEntry.SqliteStateMcLog{}
+		err := stateMcLog.GetStateMcLogFromLogEntry(&entry)
+		if err != nil {
+			return err
+		}
+		stateMcLogs = append(stateMcLogs, stateMcLog)
+	}
+	return sm.db.Model(&logEntry.SqliteStateMcLog{}).Create(stateMcLogs).Error
+}
+
+// Fetching the last (latest) entry from the state machine, for a given key.
+func (sm *SqliteStateMachine) GetEntry(entry logEntry.LogEntry) (logEntry.Entry, error) {
+
+	stateMcLog := logEntry.SqliteStateMcLog{}
+	err := stateMcLog.GetStateMcLogFromLogEntry(&entry)
+	if err != nil {
+		return nil, err
+	}
+
+	var entryResponse logEntry.SqliteStateMcLog
+	err = sm.db.Model(&logEntry.SqliteStateMcLog{}).Where("key = ?").Last(&entryResponse).Error
+	if err != nil {
+		return nil, err
+	}
+	return &entryResponse, nil
 }

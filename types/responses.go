@@ -9,7 +9,7 @@ type ResponseAppendEntryRPC struct {
 }
 
 type ResponseVoteRPC struct {
-	Voted         bool
+	VotedGranted  bool
 	OutdatedTerm  bool
 	CurrentLeader string
 }
