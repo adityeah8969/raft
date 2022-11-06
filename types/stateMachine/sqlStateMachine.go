@@ -69,16 +69,16 @@ func (sm *SqliteStateMachine) Apply(entries []logEntry.LogEntry) error {
 }
 
 // Fetching the last (latest) entry from the state machine, for a given key.
-func (sm *SqliteStateMachine) GetEntry(entry logEntry.LogEntry) (logEntry.Entry, error) {
+func (sm *SqliteStateMachine) GetEntry(entry *logEntry.LogEntry) (logEntry.Entry, error) {
 
 	stateMcLog := logEntry.SqliteStateMcLog{}
-	err := stateMcLog.GetStateMcLogFromLogEntry(&entry)
+	err := stateMcLog.GetStateMcLogFromLogEntry(entry)
 	if err != nil {
 		return nil, err
 	}
 
 	var entryResponse logEntry.SqliteStateMcLog
-	err = sm.db.Model(&logEntry.SqliteStateMcLog{}).Where("key = ?").Last(&entryResponse).Error
+	err = sm.db.Model(&logEntry.SqliteStateMcLog{}).Where("key = ?", stateMcLog.SqlData.Key).Last(&entryResponse).Error
 	if err != nil {
 		return nil, err
 	}

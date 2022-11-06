@@ -10,9 +10,9 @@ type RequestVoteRPC struct {
 }
 
 type RequestAppendEntryRPC struct {
-	LeaderTerm                 int
+	Term                       int
 	LeaderId                   string
-	PrevEntry                  logEntry.LogEntry
+	PrevEntry                  *logEntry.LogEntry
 	Entries                    []logEntry.LogEntry
 	LastCommittedEntryInLeader logEntry.LogEntry
 }

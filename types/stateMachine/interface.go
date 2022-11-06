@@ -6,6 +6,6 @@ import (
 
 type StateMachine interface {
 	Apply(entries []logEntry.LogEntry) error
-	GetEntry(entry logEntry.LogEntry) (logEntry.Entry, error)
+	GetEntry(entry *logEntry.LogEntry) (logEntry.Entry, error)
 	GetStateMachineInstance() StateMachine
 }
