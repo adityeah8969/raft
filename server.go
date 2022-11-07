@@ -3,7 +3,6 @@ package raft
 import (
 	"context"
 	"errors"
-	"log"
 	"math"
 	"net"
 	"net/http"
@@ -74,18 +73,18 @@ var followerCtxMu = &sync.Mutex{}
 func init() {
 	serverDb, err := serverdb.GetServerDbInstance()
 	if err != nil {
-		log.Fatal("initializing server db: ", err)
+		sugar.Fatalf("initializing server db: ", err)
 	}
 	err = serverDb.AutoMigrate(&Vote{})
 	if err != nil {
-		log.Fatal("auto-migrating the server db: ", err)
+		sugar.Fatalf("auto-migrating the server db: ", err)
 	}
 	stateMcInst, err := stateMachine.GetStateMachine()
 	if err != nil {
-		log.Fatal("auto-migrating the server db: ", err)
+		sugar.Fatalf("auto-migrating the server db: ", err)
 	}
 	// initializing the logs with a dummy entry, index > 0 will be considered as valid logs
-	logs := []logEntry.LogEntry{{}}
+	logs := []logEntry.LogEntry{}
 	peers := config.GetPeers()
 	rpcClients := make(map[string]interface{}, len(peers))
 	nextIndex := make(map[string]int, len(peers))
@@ -93,7 +92,7 @@ func init() {
 	for _, peer := range peers {
 		client, err := rpc.DialHTTP("tcp", peer)
 		if err != nil {
-			log.Fatal("dialing:", err)
+			sugar.Fatalf("dialing:", err)
 		}
 		rpcClients[peer] = client
 		nextIndex[peer] = 1
@@ -132,8 +131,7 @@ func StartServing() error {
 	if err != nil {
 		return err
 	}
-	// go serverInstance.startTicker()
-	// go serverInstance.applyEntriesToStateMachineIfNeeded()
+	go serverInstance.startFollowing()
 	err = http.Serve(l, nil)
 	return err
 }
@@ -172,9 +170,6 @@ func (s *Server) startTicker(ctx context.Context) {
 		case <-ctx.Done():
 			sugar.Infof("stopping ticker for server %s", s.serverId)
 			return
-		// case <-s.serverTicker.done:
-		// 	sugar.Infof("stopping ticker for server %s", s.serverId)
-		// 	return
 		case t := <-s.serverTicker.ticker.C:
 			sugar.Infof("election contest started by %s at %v", s.serverId, t)
 			go s.startContesting()
@@ -184,6 +179,7 @@ func (s *Server) startTicker(ctx context.Context) {
 }
 
 func (s *Server) resetTicker() {
+	// consider locking here
 	s.serverTicker.ticker.Reset(util.GetRandomTickerDuration(config.GetTickerIntervalInMillisecond()))
 }
 
@@ -191,7 +187,8 @@ func (s *Server) stopContesting() {
 	updateProcessContext(candidateContextInst, &processContext{}, followerCtxMu)
 }
 
-// If election timeout elapses: start new election. TODO
+// TODO: check if the election timer is needed
+// TODO: If yes, start new election whenever there is a timout and do not forget to reset everytime there is an election.
 func (s *Server) startContesting() error {
 	for {
 		select {
@@ -226,12 +223,19 @@ func (s *Server) startContesting() error {
 						CandidateId: s.serverId,
 					}
 					response := &types.ResponseVoteRPC{}
-					err = util.RPCWithRetry(client, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit())
+					// TODO. Get time from config
+					resp, err := util.RPCWithRetry(client, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit(), 2)
 					if err != nil {
 						sugar.Warnw("request vote RPC failed after retries", "candidate", s.serverId, "rpcClient", client, "request", request, "response", response)
 						response = &types.ResponseVoteRPC{
-							VotedGranted: false,
+							VoteGranted: false,
 						}
+					}
+					response, ok := resp.(*types.ResponseVoteRPC)
+					if !ok {
+						sugar.Debugw("Unable to cast response into ResponseVoteRPC", "response", resp)
+						// TODO. Check if there is any need of populating fields
+						response = &types.ResponseVoteRPC{}
 					}
 					responseChan <- response
 				}()
@@ -241,7 +245,7 @@ func (s *Server) startContesting() error {
 			voteCnt := 0
 			isTermOutdated := false
 			for resp := range responseChan {
-				if resp.VotedGranted {
+				if resp.VoteGranted {
 					voteCnt++
 					continue
 				}
@@ -259,6 +263,7 @@ func (s *Server) startContesting() error {
 				sugar.Infof("%s server had an outdated term as a candidate", s.serverId)
 				go s.startFollowing()
 				s.stopContesting()
+				return nil
 			}
 
 			if voteCnt >= int(math.Ceil(1.0*float64(len(s.peers)/2))) {
@@ -272,8 +277,9 @@ func (s *Server) startContesting() error {
 					cancel: cancel,
 				}
 				leaderCtxMu.Unlock()
-
+				s.stopContesting()
 				go s.startLeading()
+				return nil
 			}
 
 		}
@@ -311,7 +317,8 @@ func (s *Server) sendHeartBeats(ctx context.Context) {
 						// Fill the last comiitted entry here. TODO
 					}
 					response := &types.ResponseAppendEntryRPC{}
-					err := util.RPCWithRetry(client, "Server.AppendEntryRPC", request, response, config.GetRetryRPCLimit())
+					// TODO, fix this response
+					_, err := util.RPCWithRetry(client, "Server.AppendEntryRPC", request, response, config.GetRetryRPCLimit(), 2)
 					if err != nil {
 						sugar.Warnw("append entry RPC failed after retries", "leader", s.serverId, "rpcClient", client, "request", request, "response", response)
 						response = &types.ResponseAppendEntryRPC{}
@@ -350,6 +357,14 @@ func (s *Server) sendHeartBeats(ctx context.Context) {
 
 func (s *Server) startLeading() error {
 	sugar.Infof("%s started leading", s.serverId)
+
+	// Re-initialize nextIndex, matchIndex
+
+	for _, v := range s.peers {
+		s.nextIndex[v] = len(s.logs)
+		s.matchIndex[v] = 0
+	}
+
 	for {
 		select {
 		case <-leaderContextInst.ctx.Done():
@@ -358,7 +373,7 @@ func (s *Server) startLeading() error {
 		default:
 			// periodic heartbeat
 			ctx, _ := context.WithCancel(leaderContextInst.ctx)
-			// go s.makeAppendEntryCalls()
+			go s.makeAppendEntryCallsConcurrently(ctx)
 			s.sendHeartBeats(ctx)
 		}
 	}
@@ -404,10 +419,37 @@ func (s *Server) makeAppendEntryCallsConcurrently(ctx context.Context) {
 			}
 			wg.Wait()
 			for resp := range responseChan {
-				// Update the server indexes here
+				// If successful: update nextIndex and matchIndex for the follower
+				if resp.Success {
+					serverId := resp.ServerId
+					s.nextIndex[serverId] = int(math.Min(float64(resp.LastCommittedIndexInFollower+1), float64(len(s.logs)-1)))
+					s.matchIndex[serverId] = resp.LastCommittedIndexInFollower
+				}
 			}
+			s.setCommitIndex()
 		}
 	}
+}
+
+func (s *Server) setCommitIndex() {
+
+	lastCommitIndex := s.lastComittedIndex
+	finalCommitIndex := lastCommitIndex
+	lastCommitIndex++
+
+	for ; lastCommitIndex < len(s.logs)-1; lastCommitIndex++ {
+		cnt := 0
+		for _, v := range s.matchIndex {
+			if lastCommitIndex <= v {
+				cnt++
+			}
+		}
+		if cnt > len(s.peers)/2 && s.logs[lastCommitIndex].Term == s.currentTerm {
+			finalCommitIndex = lastCommitIndex
+		}
+	}
+
+	s.lastComittedIndex = finalCommitIndex
 }
 
 func (s *Server) makeAppendEntryCall(ctx context.Context, client *rpc.Client, prevEntryIndex int, request *types.RequestAppendEntryRPC, responseChan chan *types.ResponseAppendEntryRPC, wg *sync.WaitGroup) error {
@@ -555,13 +597,11 @@ func (s *Server) Get(request *types.RequestEntry) *types.ResponseEntry {
 	}
 }
 
-// AppendEntryCalls
-
 func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVoteRPC) {
 	// 	Notify that the requesting candidate should step back.
 	if s.currentTerm > req.Term {
 		res = &types.ResponseVoteRPC{
-			VotedGranted:  false,
+			VoteGranted:   false,
 			OutdatedTerm:  true,
 			CurrentLeader: s.leaderId,
 		}
@@ -570,7 +610,7 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 	// 	Do not vote for the requesting candidate, if already voted
 	if s.currentTerm == req.Term && s.votedFor != "" {
 		res = &types.ResponseVoteRPC{
-			VotedGranted: false,
+			VoteGranted: false,
 		}
 		return
 	}
@@ -580,19 +620,18 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 		// Deny, if the candidates logs are not updated enough
 		if lastServerLog.Term > req.LastLogTerm || (lastServerLog.Term == req.LastLogTerm && lastServerLog.Index > req.LastLogIndex) {
 			res = &types.ResponseVoteRPC{
-				VotedGranted: false,
+				VoteGranted: false,
 			}
 			return
 		}
 	}
 
 	// Vote for the requesting candidate
-
 	err := s.serverDb.Model(&Vote{}).Save(Vote{term: req.Term, votedFor: req.CandidateId}).Error
 	if err != nil {
 		res = &types.ResponseVoteRPC{
-			VotedGranted: false,
-			Err:          errors.New("db error while persisting vote"),
+			VoteGranted: false,
+			Err:         errors.New("db error while persisting vote"),
 		}
 		return
 	}
@@ -601,7 +640,7 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 	s.votedFor = req.CandidateId
 
 	res = &types.ResponseVoteRPC{
-		VotedGranted: true,
+		VoteGranted: true,
 	}
 }
 
@@ -619,22 +658,30 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 	}
 
 	if s.currentTerm < req.Term {
-		// revert to being a follower
-		// consider locking here
-		if s.state != string(constants.Follower) {
-			s.state = string(constants.Follower)
+		res = &types.ResponseAppendEntryRPC{
+			ServerId: s.serverId,
+			Success:  false,
 		}
+		// revert to being a follower
+		// TODO: consider locking here
 		s.currentTerm = req.Term
 		s.leaderId = req.LeaderId
 		s.votedFor = ""
-		// Check this SHIT immediately. TODO
-		// start foloowing from here
-		// where is the return statement here
+		if s.state != string(constants.Follower) {
+			s.state = string(constants.Follower)
+			if s.state == string(constants.Candidate) {
+				s.stopContesting()
+			}
+			if s.state == string(constants.Leader) {
+				s.stopLeading()
+			}
+			go s.startFollowing()
+		}
+		return
 	}
 
 	if len(req.Entries) == 0 {
-		// Check this SHIT immediately. TODO
-		// go s.heartBeatTimerReset()
+		s.resetTicker()
 		return
 	}
 
@@ -651,7 +698,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 		return
 	}
 
-	// commit
+	// TODO: Take a final call on commit. Currently consiodering appending as commit.
 	for _, entry := range req.Entries {
 		serverLog := logEntry.LogEntry{
 			Term:  entry.Term,
@@ -661,7 +708,9 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 		s.logs = append(s.logs, serverLog)
 	}
 
-	s.lastComittedIndex = int(math.Min(float64(req.LastCommittedEntryInLeader.Index), float64(len(s.logs))))
+	// TODO: As per the call on commit, this may change
+	// TODO: consider locking here
+	s.lastComittedIndex = len(s.logs) - 1
 
 	// apply entries
 	err := s.applyEntriesToStateMC(&req.LastCommittedEntryInLeader)
@@ -674,6 +723,9 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 			CurrentLeader: s.leaderId,
 		}
 	}
+
+	// TODO: consider locking here
+	s.lastAppliedIndex = req.LastCommittedEntryInLeader.Index
 
 	// return success
 	res = &types.ResponseAppendEntryRPC{
@@ -754,6 +806,7 @@ func (s *Server) applyEntriesToStateMachineIfNeeded() error {
 	}
 
 	if index == -1 {
+		sugar.Debugw("Invalid lastComittedIndex", "serverId", s.serverId)
 		return errors.New("last comitted entry in leader not found in the follower")
 	}
 
@@ -772,6 +825,7 @@ func (s *Server) applyEntriesToStateMachineIfNeeded() error {
 		return err
 	}
 
-	s.lastComittedIndex = int(math.Min(float64(s.lastComittedIndex+1), float64(len(s.logs)-1)))
+	// TODO: consider locking here
+	s.lastAppliedIndex = s.lastComittedIndex
 	return nil
 }

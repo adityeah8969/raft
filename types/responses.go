@@ -1,17 +1,18 @@
 package types
 
 type ResponseAppendEntryRPC struct {
-	ServerId            string
-	Success             bool
-	OutdatedTerm        bool
-	CurrentLeader       string
-	PreviousEntryAbsent bool
-	Term                int
+	ServerId                     string
+	Success                      bool
+	OutdatedTerm                 bool
+	CurrentLeader                string
+	PreviousEntryAbsent          bool
+	Term                         int
+	LastCommittedIndexInFollower int
 }
 
 type ResponseVoteRPC struct {
 	Term          int
-	VotedGranted  bool
+	VoteGranted   bool
 	OutdatedTerm  bool
 	CurrentLeader string
 	Err           error
