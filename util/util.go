@@ -7,13 +7,21 @@ import (
 	"time"
 
 	"github.com/adityeah8969/raft/types/logEntry"
+	"github.com/adityeah8969/raft/types/logger"
+	"go.uber.org/zap"
 )
+
+var sugar *zap.SugaredLogger
+
+func init() {
+	sugar = logger.GetLogger()
+}
 
 func GetRandomInt(max int, min int) int {
 	return rand.Intn(max-min) + min
 }
 
-func RPCWithRetry(client *rpc.Client, svcMethod string, request any, response any, retryCount int, timeoutInSeconds int) (any, error) {
+func RPCWithRetry(client *rpc.Client, svcMethod string, request any, response any, retryCount int, timeoutInSeconds int) error {
 
 	if timeoutInSeconds < 0 {
 		// TODO : get this from config
@@ -25,18 +33,20 @@ func RPCWithRetry(client *rpc.Client, svcMethod string, request any, response an
 	for {
 		select {
 		case <-timer.C:
-			return nil, errors.New("RPC timed out")
+			sugar.Debugw("RPC timed out", "svcMethod", svcMethod, "rpcClient", client)
+			return errors.New("RPC timed out")
 		default:
 			for i := 0; i < retryCount; i++ {
 				err := client.Call(svcMethod, request, response)
-				if err == nil {
-					return response, nil
+				if err != nil {
+					sugar.Debugw("RPC errored out, retrying", "error", err, "svcMethod", svcMethod, "rpcClient", client)
+					continue
 				}
+				return nil
 			}
-			return nil, err
+			return err
 		}
 	}
-
 }
 
 func GetRandomTickerDuration(interval int) time.Duration {
@@ -50,13 +60,3 @@ func GetReversedSlice(slice []logEntry.LogEntry) []logEntry.LogEntry {
 	}
 	return revSlice
 }
-
-// func GetNewProcessContext() {
-
-// 	ctx, cancel := context.WithCancel(context.Background())
-// 	updatedCtx := &processContext{
-// 		ctx:    ctx,
-// 		cancel: cancel,
-// 	}
-
-// }

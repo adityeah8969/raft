@@ -15,14 +15,16 @@ const (
 
 // check if the memebers can be made private
 type Config struct {
-	StateMachineType            string      `mapstructure:"StateMachineType"`
-	StateMachineConfig          interface{} `mapstructure:"StateMachineConfig"`
-	ServerDbType                string      `mapstructure:"ServerDbType"`
-	ServerDBConfig              interface{} `mapstructure:"ServerDbConfig"`
-	ServerId                    string      `mapstructure:"ServerId"`
-	Peers                       []string    `mapstructure:"Peers"`
-	TickerIntervalInMiliseconds int         `mapstructure:"TickerIntervalInMiliseconds"`
-	RetryRPCLimit               int         `mapstructure:"RetryRPCLimit"`
+	StateMachineType              string      `mapstructure:"StateMachineType"`
+	StateMachineConfig            interface{} `mapstructure:"StateMachineConfig"`
+	ServerDbType                  string      `mapstructure:"ServerDbType"`
+	ServerDBConfig                interface{} `mapstructure:"ServerDbConfig"`
+	ServerId                      string      `mapstructure:"ServerId"`
+	Peers                         []string    `mapstructure:"Peers"`
+	TickerIntervalInMiliseconds   int         `mapstructure:"TickerIntervalInMiliseconds"`
+	RetryRPCLimit                 int         `mapstructure:"RetryRPCLimit"`
+	RPCTimeoutInSeconds           int         `mapstructure:"RPCTimeoutInSeconds"`
+	ClientRequestTimeoutInSeconds int         `mapstructure:"ClientRequestTimeoutInSeconds"`
 }
 
 var config Config
@@ -81,6 +83,14 @@ func GetTickerIntervalInMillisecond() int {
 
 func GetRetryRPCLimit() int {
 	return config.RetryRPCLimit
+}
+
+func GetRPCTimeoutInSeconds() int {
+	return config.RPCTimeoutInSeconds
+}
+
+func GetClientRequestInSeconds() int {
+	return config.ClientRequestTimeoutInSeconds
 }
 
 type StateMachineConfig interface {

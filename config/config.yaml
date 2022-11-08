@@ -8,3 +8,5 @@ ServerDbConfig:
 Peers: ['server2', 'server3', 'server4', 'server5']
 TickerIntervalInMiliseconds: 150
 RetryRPCLimit: 5
+RPCTimeoutInSeconds: 10
+ClientRequestTimeoutInSeconds: 30
