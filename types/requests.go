@@ -9,15 +9,22 @@ type RequestVoteRPC struct {
 	LastLogIndex int
 }
 
+// type RequestAppendEntryRPC struct {
+// 	Term                  int
+// 	LeaderId              string
+// 	PrevEntry             *logEntry.LogEntry
+// 	Entries               []logEntry.LogEntry
+// 	LeaderLastCommitIndex int
+// }
+
 type RequestAppendEntryRPC struct {
-	Term                       int
-	LeaderId                   string
-	PrevEntry                  *logEntry.LogEntry
-	Entries                    []logEntry.LogEntry
-	LastCommittedEntryInLeader logEntry.LogEntry
+	Term                  int
+	LeaderId              string
+	PrevEntryIndex        int
+	PrevEntryTerm         int
+	Entries               []logEntry.LogEntry
+	LeaderLastCommitIndex int
 }
 
-type RequestEntry struct {
-	Key string `json:"key"`
-	Val string `json:"val"`
-}
+// Consider making this 'any' / 'interface{}' instead of mentioned fields
+type RequestEntry interface{}

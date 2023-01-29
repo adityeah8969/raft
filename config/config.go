@@ -15,16 +15,17 @@ const (
 
 // check if the memebers can be made private
 type Config struct {
-	StateMachineType              string      `mapstructure:"StateMachineType"`
-	StateMachineConfig            interface{} `mapstructure:"StateMachineConfig"`
-	ServerDbType                  string      `mapstructure:"ServerDbType"`
-	ServerDBConfig                interface{} `mapstructure:"ServerDbConfig"`
-	ServerId                      string      `mapstructure:"ServerId"`
-	Peers                         []string    `mapstructure:"Peers"`
-	TickerIntervalInMiliseconds   int         `mapstructure:"TickerIntervalInMiliseconds"`
-	RetryRPCLimit                 int         `mapstructure:"RetryRPCLimit"`
-	RPCTimeoutInSeconds           int         `mapstructure:"RPCTimeoutInSeconds"`
-	ClientRequestTimeoutInSeconds int         `mapstructure:"ClientRequestTimeoutInSeconds"`
+	StateMachineType               string      `mapstructure:"StateMachineType"`
+	StateMachineConfig             interface{} `mapstructure:"StateMachineConfig"`
+	ServerDbType                   string      `mapstructure:"ServerDbType"`
+	ServerDBConfig                 interface{} `mapstructure:"ServerDbConfig"`
+	ServerId                       string      `mapstructure:"ServerId"`
+	Peers                          []string    `mapstructure:"Peers"`
+	TickerIntervalInMiliseconds    int         `mapstructure:"TickerIntervalInMiliseconds"`
+	RetryRPCLimit                  int         `mapstructure:"RetryRPCLimit"`
+	RPCTimeoutInSeconds            int         `mapstructure:"RPCTimeoutInSeconds"`
+	ClientRequestTimeoutInSeconds  int         `mapstructure:"ClientRequestTimeoutInSeconds"`
+	ElectionTimerDurationInSeconds int         `mapstructure:"ElectionTimerDurationInSeconds"`
 }
 
 var config Config
@@ -89,8 +90,12 @@ func GetRPCTimeoutInSeconds() int {
 	return config.RPCTimeoutInSeconds
 }
 
-func GetClientRequestInSeconds() int {
+func GetClientRequestTimeoutInSeconds() int {
 	return config.ClientRequestTimeoutInSeconds
+}
+
+func GetElectionTimerDurationInSec() int {
+	return config.ElectionTimerDurationInSeconds
 }
 
 type StateMachineConfig interface {

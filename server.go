@@ -41,7 +41,8 @@ type processContext struct {
 }
 
 type Server struct {
-	serverId     string
+	serverId string
+	// While working with peers we should ignore the current server
 	peers        []string
 	rpcClients   map[string]interface{}
 	stateMachine stateMachine.StateMachine
@@ -54,9 +55,9 @@ type Server struct {
 	LastComittedIndex int
 	LastAppliedIndex  int
 	// next log entry to send to servers
-	NextIndex map[string]int
+	NextIndex []int
 	// index of the highest log entry known to be replicated on server
-	MatchIndex   map[string]int
+	MatchIndex   []int
 	Logs         []logEntry.LogEntry
 	ServerTicker *ServerTicker
 }
@@ -71,35 +72,47 @@ var leaderContextInst *processContext
 var candidateCtxMu = &sync.Mutex{}
 var leaderCtxMu = &sync.Mutex{}
 var followerCtxMu = &sync.Mutex{}
-var serverMu = &sync.RWMutex{}
+
+var serverMu = &sync.Mutex{}
+
+func migrateServerModels(db *gorm.DB) error {
+	err := db.AutoMigrate(&Vote{}, &logEntry.LogEntry{})
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
 func init() {
+
 	serverDb, err := serverdb.GetServerDbInstance()
 	if err != nil {
 		sugar.Fatalf("initializing server db: ", err)
 	}
-	err = serverDb.AutoMigrate(&Vote{})
+
+	err = migrateServerModels(serverDb)
 	if err != nil {
-		sugar.Fatalf("auto-migrating the server db: ", err)
+		sugar.Fatalf("migrating db models: ", err)
 	}
+
 	stateMcInst, err := stateMachine.GetStateMachine()
 	if err != nil {
 		sugar.Fatalf("auto-migrating the server db: ", err)
 	}
 	// initializing the logs with a dummy entry, index > 0 will be considered as valid logs
-	logs := []logEntry.LogEntry{}
+	logs := make([]logEntry.LogEntry, 0)
 	peers := config.GetPeers()
 	rpcClients := make(map[string]interface{}, len(peers))
-	nextIndex := make(map[string]int, len(peers))
-	matchIndex := make(map[string]int, len(peers))
-	for _, peer := range peers {
+	nextIndex := make([]int, len(peers))
+	matchIndex := make([]int, len(peers))
+	for index, peer := range peers {
 		client, err := rpc.DialHTTP("tcp", peer)
 		if err != nil {
 			sugar.Fatalf("dialing:", err)
 		}
 		rpcClients[peer] = client
-		nextIndex[peer] = 1
-		matchIndex[peer] = 0
+		nextIndex[index] = 1
+		matchIndex[index] = 0
 	}
 	serverTicker := &ServerTicker{
 		ticker: time.NewTicker(time.Duration(config.GetTickerIntervalInMillisecond()) * time.Millisecond),
@@ -122,6 +135,8 @@ func init() {
 		LastAppliedIndex:  0,
 	}
 	sugar = logger.GetLogger()
+
+	// Check if we can make do with just one context
 	followerContextInst = &processContext{}
 	candidateContextInst = &processContext{}
 	leaderContextInst = &processContext{}
@@ -136,9 +151,9 @@ func StartServing() error {
 	}
 	go serverInstance.startFollowing()
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go serverInstance.applyEntries(ctx)
 	err = http.Serve(l, nil)
-	cancel()
 	return err
 }
 
@@ -152,6 +167,7 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 			VoteGranted:   false,
 			OutdatedTerm:  true,
 			CurrentLeader: clonedInst.LeaderId,
+			Term:          clonedInst.CurrentTerm,
 		}
 		return
 	}
@@ -162,9 +178,9 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 		}
 		return
 	}
-	var lastServerLog logEntry.LogEntry
+
 	if len(clonedInst.Logs) > 0 {
-		lastServerLog = clonedInst.Logs[len(clonedInst.Logs)-1]
+		lastServerLog := clonedInst.Logs[len(clonedInst.Logs)-1]
 		// Deny, if the candidates logs are not updated enough
 		if lastServerLog.Term > req.LastLogTerm || (lastServerLog.Term == req.LastLogTerm && lastServerLog.Index > req.LastLogIndex) {
 			res = &types.ResponseVoteRPC{
@@ -246,7 +262,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 	}
 
 	// return failure
-	ok := s.isPreviousEntryPresent(req.PrevEntry)
+	ok := s.trimInconsistentLogs(req.PrevEntryIndex, req.PrevEntryTerm)
 	if !ok {
 		res = &types.ResponseAppendEntryRPC{
 			ServerId:            clonedInst.serverId,
@@ -259,41 +275,18 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 	}
 
 	updatedAttrs := make(map[string]interface{})
-	updatedLogs := make([]logEntry.LogEntry, 0)
-
-	// TODO: Take a final call on commit. Currently considering appending as commit.
-	for _, entry := range req.Entries {
-		serverLog := logEntry.LogEntry{
-			Term:  entry.Term,
-			Index: entry.Index,
-			Entry: entry.Entry,
-		}
-		updatedLogs = append(clonedInst.Logs, serverLog)
-	}
+	updatedLogs := append(clonedInst.Logs, req.Entries...)
 	updatedAttrs["Logs"] = updatedLogs
-	// TODO: As per the call on commit, this may change
-	updatedAttrs["LastComittedIndex"] = len(s.Logs) - 1
-	// apply entries
-	err := s.applyEntriesToStateMachine(req.LastCommittedEntryInLeader.Index)
-	if err != nil {
-		// log here
-		res = &types.ResponseAppendEntryRPC{
-			ServerId:      s.serverId,
-			Success:       false,
-			OutdatedTerm:  false,
-			CurrentLeader: s.LeaderId,
-		}
-	}
-
-	updatedAttrs["LastAppliedIndex"] = req.LastCommittedEntryInLeader.Index
+	updatedAttrs["LastComittedIndex"] = len(updatedLogs) - 1
 	s.update(updatedAttrs)
 
 	// return success
 	res = &types.ResponseAppendEntryRPC{
-		ServerId:      s.serverId,
-		Success:       true,
-		OutdatedTerm:  false,
-		CurrentLeader: s.LeaderId,
+		ServerId:                     s.serverId,
+		Success:                      true,
+		CurrentLeader:                s.LeaderId,
+		Term:                         s.CurrentTerm,
+		LastCommittedIndexInFollower: len(updatedLogs) - 1,
 	}
 }
 
@@ -330,13 +323,15 @@ func (s *Server) Set(request *types.RequestEntry) *types.ResponseEntry {
 	s.update(updatedAttrs)
 
 	// We need a way to synchronously send the response back to the client after the entry is applied to the state machine.
-	// Just check if the entry has been applied, let it be a blocking call.
-	timer := time.NewTimer(time.Duration(config.GetClientRequestInSeconds()) * time.Second)
+	// Just check if the entry has been applied, let it be a blocking call (As per the raft paper).
+
+	// TODO: In case there is a timeout and the client sends the same request back. Take care of that.
+	timer := time.NewTimer(time.Duration(config.GetClientRequestTimeoutInSeconds()) * time.Second)
 
 	for {
 		select {
 		case <-timer.C:
-			sugar.Debugf("timing out while applying the entry", "serverId", s.serverId, "leaderId", s.LeaderId, "logEntry", log)
+			sugar.Debugf("timing out while applying the entry", "serverId", s.serverId, "logEntry", log)
 			return &types.ResponseEntry{
 				Success: false,
 				Err:     errors.New("timing out while applying the entry"),
@@ -440,8 +435,8 @@ func (s *Server) update(updatedAttrs map[string]interface{}) error {
 }
 
 func (s *Server) getClonedInst() *Server {
-	serverMu.RLock()
-	defer serverMu.RUnlock()
+	serverMu.Lock()
+	defer serverMu.Unlock()
 	clonedInst := clone.Clone(serverInstance).(*Server)
 	return clonedInst
 }
@@ -453,12 +448,15 @@ func (s *Server) stopContesting() {
 }
 
 func (s *Server) startContesting() error {
+
+	electionTimer := time.NewTimer(time.Duration(config.GetElectionTimerDurationInSec()) * time.Second)
 	for {
 		select {
 		case <-candidateContextInst.ctx.Done():
-			sugar.Infof("stopping election contest for server %s", s.serverId)
+			sugar.Infof("server %s stopped contesting election", s.serverId)
 			return nil
-		default:
+			// Should be server ticker
+		case <-electionTimer.C:
 
 			err := s.voteForItself()
 			if err != nil {
@@ -490,35 +488,31 @@ func (s *Server) startContesting() error {
 				}()
 			}
 			wg.Wait()
+			close(responseChan)
 
 			voteCnt := 0
-			isTermOutdated := false
 			for resp := range responseChan {
 				if resp.VoteGranted {
 					voteCnt++
 					continue
 				}
 				if resp.OutdatedTerm {
+					electionTimer.Stop()
 					updatedAttrs := map[string]interface{}{
 						"State":       string(constants.Follower),
 						"LeaderId":    resp.CurrentLeader,
 						"CurrentTerm": resp.Term,
 					}
 					s.update(updatedAttrs)
-					isTermOutdated = true
-					break
+					sugar.Infof("%s server had an outdated term as a candidate", s.serverId)
+					go s.startFollowing()
+					s.stopContesting()
+					return nil
 				}
-			}
-			close(responseChan)
-			if isTermOutdated {
-				sugar.Infof("%s server had an outdated term as a candidate", s.serverId)
-				go s.startFollowing()
-				s.stopContesting()
-				return nil
 			}
 
 			if voteCnt >= int(math.Ceil(1.0*float64(len(s.peers)/2))) {
-
+				electionTimer.Stop()
 				updatedAttrs := map[string]interface{}{
 					"LeaderId": s.serverId,
 					"State":    string(constants.Leader),
@@ -536,7 +530,7 @@ func (s *Server) startContesting() error {
 				go s.startLeading()
 				return nil
 			}
-
+			electionTimer.Reset(time.Duration(config.GetElectionTimerDurationInSec()) * time.Second)
 		}
 	}
 }
@@ -563,16 +557,16 @@ func (s *Server) startLeading() error {
 	sugar.Infof("%s started leading", s.serverId)
 
 	clonedInst := s.getClonedInst()
-	updatedNextIndexMap := make(map[string]int, len(s.peers))
-	updatedMatchIndexMap := make(map[string]int, len(s.peers))
-	for _, v := range s.peers {
-		updatedNextIndexMap[v] = len(clonedInst.Logs)
-		updatedMatchIndexMap[v] = 0
+	updatedNextIndexSlice := make([]int, len(s.peers))
+	updatedMatchIndexSlice := make([]int, len(s.peers))
+	for i := range s.peers {
+		updatedNextIndexSlice[i] = len(clonedInst.Logs)
+		updatedMatchIndexSlice[i] = 0
 	}
 
 	updatedAttrs := map[string]interface{}{
-		"NextIndex":  updatedNextIndexMap,
-		"MatchIndex": updatedMatchIndexMap,
+		"NextIndex":  updatedNextIndexSlice,
+		"MatchIndex": updatedMatchIndexSlice,
 	}
 	s.update(updatedAttrs)
 
@@ -585,74 +579,12 @@ func (s *Server) startLeading() error {
 			// periodic heartbeat
 			ctx, _ := context.WithCancel(leaderContextInst.ctx)
 			go s.makeAppendEntryCallsConcurrently(ctx)
-			s.sendHeartBeats(ctx)
+			s.sendPeriodicHeartBeats(ctx)
 		}
 	}
 }
 
-func (s *Server) stopLeading() {
-	serverMu.Lock()
-	defer serverMu.Unlock()
-	updateProcessContext(leaderContextInst, &processContext{}, leaderCtxMu)
-}
-
-func (s *Server) applyEntries(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			sugar.Debugf("server %s stopped applying entries on context cancellation", s.serverId)
-			return
-		default:
-			clonedInst := s.getClonedInst()
-			s.applyEntriesToStateMachine(clonedInst.LastComittedIndex)
-		}
-	}
-}
-
-func (s *Server) applyEntriesToStateMachine(lastComittedIndex int) error {
-
-	clonedInst := s.getClonedInst()
-
-	if lastComittedIndex <= clonedInst.LastAppliedIndex {
-		return nil
-	}
-
-	index := -1
-	for i := len(clonedInst.Logs) - 1; i >= 0; i-- {
-		if i == lastComittedIndex {
-			index = i
-			break
-		}
-	}
-
-	if index == -1 {
-		sugar.Debugw("Invalid lastComittedIndex", "serverId", s.serverId)
-		return errors.New("last comitted entry in leader not found in the follower")
-	}
-
-	batchEntries := make([]logEntry.LogEntry, 0)
-	for ; index >= 0; index-- {
-		if index == clonedInst.LastAppliedIndex {
-			break
-		}
-		batchEntries = append(batchEntries, s.Logs[index])
-	}
-	batchEntries = util.GetReversedSlice(batchEntries)
-
-	err := s.stateMachine.Apply(batchEntries)
-	if err != nil {
-		return err
-	}
-
-	updatedAttrs := map[string]interface{}{
-		"LastAppliedIndex": lastComittedIndex,
-	}
-	s.update(updatedAttrs)
-
-	return nil
-}
-
-func (s *Server) sendHeartBeats(ctx context.Context) {
+func (s *Server) sendPeriodicHeartBeats(ctx context.Context) {
 	heartBeatTicker := ServerTicker{
 		ticker: time.NewTicker(time.Duration(config.GetTickerIntervalInMillisecond()) * time.Millisecond),
 		done:   make(chan bool),
@@ -661,7 +593,7 @@ func (s *Server) sendHeartBeats(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			sugar.Infof("%s started leading", s.serverId)
+			sugar.Infof("%s done sending periodic heartbeat", s.serverId)
 			return
 		case <-heartBeatTicker.ticker.C:
 
@@ -675,9 +607,9 @@ func (s *Server) sendHeartBeats(ctx context.Context) {
 					defer wg.Done()
 					client := s.rpcClients[i].(*rpc.Client)
 					request := &types.RequestAppendEntryRPC{
-						Term:                       clonedInst.CurrentTerm,
-						LeaderId:                   clonedInst.serverId,
-						LastCommittedEntryInLeader: clonedInst.Logs[clonedInst.LastComittedIndex],
+						Term:                  clonedInst.CurrentTerm,
+						LeaderId:              clonedInst.serverId,
+						LeaderLastCommitIndex: clonedInst.LastComittedIndex,
 					}
 					response := &types.ResponseAppendEntryRPC{}
 					err := util.RPCWithRetry(client, "Server.AppendEntryRPC", request, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
@@ -718,6 +650,54 @@ func (s *Server) sendHeartBeats(ctx context.Context) {
 	}
 }
 
+func (s *Server) stopLeading() {
+	serverMu.Lock()
+	defer serverMu.Unlock()
+	updateProcessContext(leaderContextInst, &processContext{}, leaderCtxMu)
+}
+
+func (s *Server) applyEntries(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			sugar.Debugf("server %s stopped applying entries on context cancellation", s.serverId)
+			return
+		default:
+			err := s.applyEntriesToStateMachine()
+			if err != nil {
+				sugar.Debugf("applying entries to server %s : %v", s.serverId, err)
+			}
+		}
+	}
+}
+
+func (s *Server) applyEntriesToStateMachine() error {
+
+	clonedInst := s.getClonedInst()
+
+	if clonedInst.LastComittedIndex <= clonedInst.LastAppliedIndex {
+		return nil
+	}
+
+	batchEntries := s.Logs[clonedInst.LastAppliedIndex+1 : clonedInst.LastComittedIndex+1]
+
+	if len(batchEntries) == 0 {
+		return nil
+	}
+
+	err := s.stateMachine.Apply(batchEntries)
+	if err != nil {
+		return err
+	}
+
+	updatedAttrs := map[string]interface{}{
+		"LastAppliedIndex": clonedInst.LastComittedIndex,
+	}
+	s.update(updatedAttrs)
+
+	return nil
+}
+
 func (s *Server) makeAppendEntryCallsConcurrently(ctx context.Context) {
 
 	clonedInst := s.getClonedInst()
@@ -730,156 +710,156 @@ func (s *Server) makeAppendEntryCallsConcurrently(ctx context.Context) {
 		default:
 			responseChan := make(chan *types.ResponseAppendEntryRPC)
 			wg := &sync.WaitGroup{}
-			for k := range clonedInst.rpcClients {
-				client := clonedInst.rpcClients[k].(*rpc.Client)
-				nextIndex := clonedInst.NextIndex[k]
-				prevEntryIndex := nextIndex - 1
-				prevEntry := clonedInst.Logs[prevEntryIndex]
-				lastComittedEntry := clonedInst.Logs[clonedInst.LastComittedIndex]
-				bulkEntries := make([]logEntry.LogEntry, len(clonedInst.Logs)-nextIndex)
-				for i := len(clonedInst.Logs) - 1; i >= nextIndex; i-- {
-					bulkEntries = append(bulkEntries, clonedInst.Logs[i])
+			for serverId := range clonedInst.rpcClients {
+				client := clonedInst.rpcClients[serverId].(*rpc.Client)
+
+				serverIndex, err := util.GetServerIndex(serverId)
+				if err != nil {
+					sugar.Debugf("Unable to get server index in peers list for : %s", serverId)
 				}
-				bulkEntries = util.GetReversedSlice(bulkEntries)
-				var request *types.RequestAppendEntryRPC
-				if len(s.Logs)-1 >= clonedInst.NextIndex[k] {
-					request = &types.RequestAppendEntryRPC{
-						Term:                       clonedInst.CurrentTerm,
-						LeaderId:                   clonedInst.serverId,
-						PrevEntry:                  &prevEntry,
-						Entries:                    bulkEntries,
-						LastCommittedEntryInLeader: lastComittedEntry,
-					}
+
+				prevEntryIndex := clonedInst.NextIndex[serverIndex] - 1
+				// TODO: may have the check prevEntryIndex > 0
+				prevEntryTerm := clonedInst.Logs[prevEntryIndex].Term
+				bulkEntries := clonedInst.Logs[clonedInst.NextIndex[serverIndex]:]
+
+				if len(bulkEntries) == 0 {
+					continue
 				}
+
+				request := &types.RequestAppendEntryRPC{
+					Term:                  clonedInst.CurrentTerm,
+					LeaderId:              clonedInst.serverId,
+					PrevEntryIndex:        prevEntryIndex,
+					PrevEntryTerm:         prevEntryTerm,
+					Entries:               bulkEntries,
+					LeaderLastCommitIndex: clonedInst.LastComittedIndex,
+				}
+
 				ctx, _ = context.WithCancel(ctx)
 				wg.Add(1)
-				go s.makeAppendEntryCall(ctx, client, prevEntryIndex, request, responseChan, wg)
+				go s.makeAppendEntryCall(ctx, client, prevEntryIndex, clonedInst.Logs, request, responseChan, wg)
 			}
 			wg.Wait()
 			updatedNextIndex := clonedInst.NextIndex
 			updatedMatchIndex := clonedInst.MatchIndex
+
 			for resp := range responseChan {
-				// If successful: update nextIndex and matchIndex for the follower
-				if resp.Success {
-					serverId := resp.ServerId
-					updatedNextIndex[serverId] = int(math.Min(float64(resp.LastCommittedIndexInFollower+1), float64(len(clonedInst.Logs)-1)))
-					updatedMatchIndex[serverId] = resp.LastCommittedIndexInFollower
+				if !resp.Success && resp.OutdatedTerm {
+					// revert to being a follower
+					updatedAttrs := map[string]interface{}{
+						"State":       string(constants.Follower),
+						"LeaderId":    resp.CurrentLeader,
+						"CurrentTerm": resp.Term,
+					}
+					s.update(updatedAttrs)
+					go s.startFollowing()
+					s.stopLeading()
+					return
 				}
+				// If successful: update nextIndex and matchIndex for the follower
+				serverId := resp.ServerId
+				serverIndex, err := util.GetServerIndex(serverId)
+				if err != nil {
+					sugar.Debugf("Unable to get serverIndex for %s", serverId)
+					continue
+				}
+				updatedNextIndex[serverIndex] = int(math.Min(float64(resp.LastCommittedIndexInFollower+1), float64(len(clonedInst.Logs)-1)))
+				updatedMatchIndex[serverIndex] = resp.LastCommittedIndexInFollower
 			}
 			updatedAttrs := map[string]interface{}{
 				"NextIndex":  updatedNextIndex,
 				"MatchIndex": updatedMatchIndex,
 			}
 			s.update(updatedAttrs)
-			s.setCommitIndex()
+			s.updateCommitIndex()
 		}
 	}
 }
 
-func (s *Server) makeAppendEntryCall(ctx context.Context, client *rpc.Client, prevEntryIndex int, request *types.RequestAppendEntryRPC, responseChan chan *types.ResponseAppendEntryRPC, wg *sync.WaitGroup) error {
+func (s *Server) makeAppendEntryCall(ctx context.Context, client *rpc.Client, prevEntryIndex int, logs []logEntry.LogEntry, request *types.RequestAppendEntryRPC, responseChan chan *types.ResponseAppendEntryRPC, wg *sync.WaitGroup) {
 	defer wg.Done()
 	response := &types.ResponseAppendEntryRPC{}
-	clonedInst := s.getClonedInst()
 	for {
 		select {
 		case <-ctx.Done():
 			sugar.Debugw("append entry call stopped by context", "leaderId", s.serverId)
-			return errors.New("append entry call stopped by context")
+			return
 		default:
 			err := util.RPCWithRetry(client, "Server.AppendEntryRPC", request, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
 			if err != nil {
 				sugar.Warnw("append entry RPC calls failed", "Error", err, "leaderId", s.serverId, "rpcClient", client)
 				response = &types.ResponseAppendEntryRPC{}
 				responseChan <- response
-				return err
+				return
 			}
-			if !response.Success {
-				if response.OutdatedTerm {
-					// revert to being a follower
-					updatedAttrs := map[string]interface{}{
-						"State":       string(constants.Follower),
-						"LeaderId":    response.CurrentLeader,
-						"CurrentTerm": response.Term,
-					}
-					s.update(updatedAttrs)
-					go s.startFollowing()
-					s.stopLeading()
-					return nil
+			if response.PreviousEntryAbsent {
+				request.Entries = logs[prevEntryIndex:]
+				updatedPrevEntryIndex := prevEntryIndex - 1
+				var updatedPrevEntryTerm int
+				if updatedPrevEntryIndex < 0 {
+					updatedPrevEntryTerm = -1
+				} else {
+					updatedPrevEntryTerm = logs[updatedPrevEntryIndex].Term
 				}
-				if response.PreviousEntryAbsent {
-					// update prevEntry and try again
-					prevEntryIndex--
-					if prevEntryIndex < 0 {
-						request.PrevEntry = nil
-						continue
-					}
-					prevEntry := clonedInst.Logs[prevEntryIndex]
-					request.PrevEntry = &prevEntry
-					continue
-				}
+				request.PrevEntryIndex = updatedPrevEntryIndex
+				request.PrevEntryTerm = updatedPrevEntryTerm
+				continue
 			}
 			responseChan <- response
-			return nil
+			return
 		}
 	}
 }
 
-func (s *Server) setCommitIndex() {
+func (s *Server) updateCommitIndex() {
 
 	clonedInst := s.getClonedInst()
 
 	lastCommitIndex := clonedInst.LastComittedIndex
-	finalCommitIndex := lastCommitIndex
-	lastCommitIndex++
 
-	for ; lastCommitIndex < len(clonedInst.Logs)-1; lastCommitIndex++ {
+	var updatedCommitIndex int
+
+	for index := lastCommitIndex; index < len(clonedInst.Logs); index++ {
 		cnt := 0
-		for _, v := range clonedInst.MatchIndex {
-			if lastCommitIndex <= v {
+		for _, matchIndex := range clonedInst.MatchIndex {
+			if matchIndex >= index {
 				cnt++
 			}
 		}
 		if cnt > len(clonedInst.peers)/2 && clonedInst.Logs[lastCommitIndex].Term == clonedInst.CurrentTerm {
-			finalCommitIndex = lastCommitIndex
-		}
-	}
-
-	updatedAttrs := map[string]interface{}{
-		"LastComittedIndex": finalCommitIndex,
-	}
-	s.update(updatedAttrs)
-}
-
-func (s *Server) isPreviousEntryPresent(prevEntry *logEntry.LogEntry) bool {
-
-	clonedInst := s.getClonedInst()
-	updatedLogs := make([]logEntry.LogEntry, 0)
-	updatedAttrs := make(map[string]interface{}, 0)
-
-	if prevEntry == nil {
-		updatedLogs = clonedInst.Logs[:0]
-		updatedAttrs["Logs"] = updatedLogs
-		s.update(updatedAttrs)
-		return true
-	}
-
-	index := -1
-	entryFound := false
-	for i := len(clonedInst.Logs) - 1; i >= 0; i-- {
-		if clonedInst.Logs[i].Term < prevEntry.Term {
-			return false
-		}
-		if clonedInst.Logs[i] == *prevEntry {
-			entryFound = true
-			index = i
+			updatedCommitIndex = index
 			break
 		}
 	}
 
-	if entryFound {
-		updatedLogs = clonedInst.Logs[:index+1]
-		updatedAttrs["Logs"] = updatedLogs
+	if updatedCommitIndex == 0 {
+		return
+	}
+
+	updatedAttrs := map[string]interface{}{
+		"LastComittedIndex": updatedCommitIndex,
+	}
+	s.update(updatedAttrs)
+}
+
+func (s *Server) trimInconsistentLogs(prevEntryIndex int, prevEntryTerm int) bool {
+
+	logs := s.getClonedInst().Logs
+	updatedAttrs := make(map[string]interface{}, 0)
+
+	if prevEntryIndex == -1 {
+		updatedAttrs["Logs"] = logs[:0]
 		s.update(updatedAttrs)
+		return true
+	}
+
+	for i := len(logs) - 1; i >= 0; i-- {
+		if i == prevEntryIndex && logs[i].Term == prevEntryTerm {
+			updatedAttrs["Logs"] = logs[:i+1]
+			s.update(updatedAttrs)
+			return true
+		}
 	}
 
 	return false

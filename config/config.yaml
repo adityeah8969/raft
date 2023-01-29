@@ -10,3 +10,4 @@ TickerIntervalInMiliseconds: 150
 RetryRPCLimit: 5
 RPCTimeoutInSeconds: 10
 ClientRequestTimeoutInSeconds: 30
+ElectionTimerDurationInSeconds: 60

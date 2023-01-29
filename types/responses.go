@@ -1,7 +1,8 @@
 package types
 
 type ResponseAppendEntryRPC struct {
-	ServerId                     string
+	ServerId string
+	// Check if the 'Success' field is needed
 	Success                      bool
 	OutdatedTerm                 bool
 	CurrentLeader                string

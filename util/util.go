@@ -2,8 +2,11 @@ package util
 
 import (
 	"errors"
+	"fmt"
 	"math/rand"
 	"net/rpc"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/adityeah8969/raft/types/logEntry"
@@ -59,4 +62,17 @@ func GetReversedSlice(slice []logEntry.LogEntry) []logEntry.LogEntry {
 		revSlice = append(revSlice, slice[i])
 	}
 	return revSlice
+}
+
+func GetServerId(id int) string {
+	return fmt.Sprintf("server-%v", id)
+}
+
+func GetServerIndex(serverId string) (int, error) {
+	// TODO: "server-" has to be taken from a variable
+	index, err := strconv.Atoi(strings.TrimPrefix(serverId, "server-"))
+	if err != nil {
+		return -1, err
+	}
+	return index, nil
 }
