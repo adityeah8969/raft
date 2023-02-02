@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -35,6 +36,7 @@ type Vote struct {
 }
 
 type processContext struct {
+	ctxMu  *sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -48,7 +50,7 @@ type Server struct {
 	serverDb     *gorm.DB
 
 	LeaderId          string
-	State             string
+	State             constants.ServerState
 	CurrentTerm       int
 	VotedFor          string
 	LastComittedIndex int
@@ -64,15 +66,10 @@ type Server struct {
 var serverInstance *Server
 var sugar *zap.SugaredLogger
 
-var followerContextInst *processContext
-var candidateContextInst *processContext
-var leaderContextInst *processContext
+var serverCtx *processContext
+var serverMu sync.Mutex
 
-var candidateCtxMu = &sync.Mutex{}
-var leaderCtxMu = &sync.Mutex{}
-var followerCtxMu = &sync.Mutex{}
-
-var serverMu = &sync.Mutex{}
+var stateStartFunc map[constants.ServerState]func(context.Context)
 
 func init() {
 
@@ -112,7 +109,7 @@ func init() {
 	serverInstance = &Server{
 		serverId:          config.GetServerId(),
 		peers:             peers,
-		State:             string(constants.Follower),
+		State:             constants.Follower,
 		serverDb:          serverDb,
 		stateMachine:      stateMcInst,
 		NextIndex:         nextIndex,
@@ -127,10 +124,15 @@ func init() {
 	}
 	sugar = logger.GetLogger()
 
-	// Check if we can make do with just one context
-	followerContextInst = &processContext{}
-	candidateContextInst = &processContext{}
-	leaderContextInst = &processContext{}
+	serverCtx = &processContext{
+		ctxMu: &sync.Mutex{},
+	}
+
+	stateStartFunc = map[constants.ServerState]func(context.Context){
+		constants.Follower:  serverInstance.startFollowing,
+		constants.Candidate: serverInstance.startContesting,
+		constants.Leader:    serverInstance.startLeading,
+	}
 }
 
 func StartServing() error {
@@ -140,8 +142,15 @@ func StartServing() error {
 	if err != nil {
 		return err
 	}
-	go serverInstance.startFollowing()
 	ctx, cancel := context.WithCancel(context.Background())
+
+	serverCtx.ctxMu.Lock()
+	serverCtx.ctx = ctx
+	serverCtx.cancel = cancel
+	serverCtx.ctxMu.Unlock()
+	go serverInstance.startFollowing(ctx)
+
+	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
 	go serverInstance.applyEntries(ctx)
 	err = http.Serve(l, nil)
@@ -154,16 +163,6 @@ func migrateServerModels(db *gorm.DB) error {
 		return err
 	}
 	return nil
-}
-
-func updateProcessContext(procCtx *processContext, updatedCtx *processContext, ctxMu *sync.Mutex) {
-	ctxMu.Lock()
-	defer ctxMu.Unlock()
-	if procCtx.cancel != nil {
-		procCtx.cancel()
-	}
-	procCtx.ctx = updatedCtx.ctx
-	procCtx.cancel = updatedCtx.cancel
 }
 
 func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVoteRPC) {
@@ -240,7 +239,6 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 			ServerId: clonedInst.serverId,
 			Success:  false,
 		}
-
 		updatedAttrs := map[string]interface{}{
 			"CurrentTerm": req.Term,
 			"LeaderId":    req.LeaderId,
@@ -250,15 +248,8 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 		s.update(updatedAttrs)
 	}
 
-	switch clonedInst.State {
-	case string(constants.Candidate):
-		go s.stopContesting()
-	case string(constants.Leader):
-		go s.stopLeading()
-	}
-
-	if clonedInst.State != string(constants.Follower) {
-		s.startFollowing()
+	if clonedInst.State != constants.Follower {
+		s.updateState(clonedInst.State, constants.Follower)
 	}
 
 	if len(req.Entries) == 0 {
@@ -418,4 +409,31 @@ func (s *Server) resetTicker() {
 	serverMu.Lock()
 	defer serverMu.Unlock()
 	s.ServerTicker.ticker.Reset(util.GetRandomTickerDuration(config.GetTickerIntervalInMillisecond()))
+}
+
+// can we take extra update attrs here
+func (s *Server) updateState(from constants.ServerState, to constants.ServerState) error {
+	clonedInst := s.getClonedInst()
+
+	if clonedInst.State != from {
+		sugar.Debugf("unable to change state", "serverId", clonedInst.serverId, "currentState", clonedInst.State, "expectedState", from, "finalState", to)
+		return fmt.Errorf(fmt.Sprintf("server in %v state cannot update state from %s to %s", clonedInst.State, from, to))
+	}
+
+	serverCtx.ctxMu.Lock()
+
+	if serverCtx.cancel != nil {
+		serverCtx.cancel()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	serverCtx.ctx = ctx
+	serverCtx.cancel = cancel
+
+	serverCtx.ctxMu.Unlock()
+
+	go stateStartFunc[to](ctx)
+
+	return nil
 }

@@ -31,41 +31,18 @@ func (s *Server) voteForItself() error {
 	return nil
 }
 
-func (s *Server) startServerTicker(ctx context.Context) {
-	defer s.ServerTicker.ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			sugar.Infof("stopping ticker for server %s", s.serverId)
-			return
-		case t := <-s.ServerTicker.ticker.C:
-			sugar.Infof("election contest started by %s at %v", s.serverId, t)
-			go s.stopFollowing()
-			s.startContesting()
-		}
-	}
-}
-
-func (s *Server) stopContesting() {
-	serverMu.Lock()
-	defer serverMu.Unlock()
-	updateProcessContext(candidateContextInst, &processContext{}, followerCtxMu)
-}
-
-func (s *Server) startContesting() error {
+func (s *Server) startContesting(ctx context.Context) {
 
 	electionTimer := time.NewTimer(time.Duration(config.GetElectionTimerDurationInSec()) * time.Second)
 	for {
 		select {
-		case <-candidateContextInst.ctx.Done():
+		case <-ctx.Done():
 			sugar.Infof("server %s stopped contesting election", s.serverId)
-			return nil
-			// Should be server ticker
 		case <-electionTimer.C:
 
 			err := s.voteForItself()
 			if err != nil {
-				return err
+				sugar.Debugf("server %s voted for itsefl", s.serverId)
 			}
 
 			var wg sync.WaitGroup
@@ -74,9 +51,9 @@ func (s *Server) startContesting() error {
 			responseChan := make(chan *types.ResponseVoteRPC, len(s.peers))
 
 			for k := range s.rpcClients {
-				go func() {
+				go func(clientI interface{}) {
 					defer wg.Done()
-					client := s.rpcClients[k].(*rpc.Client)
+					client := clientI.(*rpc.Client)
 					request := &types.RequestVoteRPC{
 						Term:        s.CurrentTerm,
 						CandidateId: s.serverId,
@@ -90,7 +67,7 @@ func (s *Server) startContesting() error {
 						}
 					}
 					responseChan <- response
-				}()
+				}(s.rpcClients[k])
 			}
 			wg.Wait()
 			close(responseChan)
@@ -104,15 +81,13 @@ func (s *Server) startContesting() error {
 				if resp.OutdatedTerm {
 					electionTimer.Stop()
 					updatedAttrs := map[string]interface{}{
-						"State":       string(constants.Follower),
 						"LeaderId":    resp.CurrentLeader,
 						"CurrentTerm": resp.Term,
 					}
 					s.update(updatedAttrs)
 					sugar.Infof("%s server had an outdated term as a candidate", s.serverId)
-					go s.startFollowing()
-					s.stopContesting()
-					return nil
+					s.updateState(constants.Candidate, constants.Follower)
+					return
 				}
 			}
 
@@ -120,20 +95,10 @@ func (s *Server) startContesting() error {
 				electionTimer.Stop()
 				updatedAttrs := map[string]interface{}{
 					"LeaderId": s.serverId,
-					"State":    string(constants.Leader),
 				}
 				s.update(updatedAttrs)
-
-				ctx, cancel := context.WithCancel(context.Background())
-				updatedCtx := &processContext{
-					ctx:    ctx,
-					cancel: cancel,
-				}
-				updateProcessContext(leaderContextInst, updatedCtx, leaderCtxMu)
-
-				s.stopContesting()
-				go s.startLeading()
-				return nil
+				s.updateState(constants.Candidate, constants.Leader)
+				return
 			}
 			electionTimer.Reset(time.Duration(config.GetElectionTimerDurationInSec()) * time.Second)
 		}

@@ -15,9 +15,10 @@ import (
 	"github.com/adityeah8969/raft/util"
 )
 
-func (s *Server) startLeading() error {
+func (s *Server) startLeading(ctx context.Context) {
 	sugar.Infof("%s started leading", s.serverId)
 
+	// make this a separate method
 	clonedInst := s.getClonedInst()
 	updatedNextIndexSlice := make([]int, len(s.peers))
 	updatedMatchIndexSlice := make([]int, len(s.peers))
@@ -29,27 +30,19 @@ func (s *Server) startLeading() error {
 	updatedAttrs := map[string]interface{}{
 		"NextIndex":  updatedNextIndexSlice,
 		"MatchIndex": updatedMatchIndexSlice,
+		"State":      constants.Leader,
 	}
 	s.update(updatedAttrs)
 
 	for {
 		select {
-		case <-leaderContextInst.ctx.Done():
+		case <-ctx.Done():
 			sugar.Infof("%s stopped leading", clonedInst.serverId)
-			return nil
 		default:
-			// periodic heartbeat
-			ctx, _ := context.WithCancel(leaderContextInst.ctx)
 			go s.makeAppendEntryCallsConcurrently(ctx)
 			s.sendPeriodicHeartBeats(ctx)
 		}
 	}
-}
-
-func (s *Server) stopLeading() {
-	serverMu.Lock()
-	defer serverMu.Unlock()
-	updateProcessContext(leaderContextInst, &processContext{}, leaderCtxMu)
 }
 
 func (s *Server) sendPeriodicHeartBeats(ctx context.Context) {
@@ -71,9 +64,9 @@ func (s *Server) sendPeriodicHeartBeats(ctx context.Context) {
 			clonedInst := s.getClonedInst()
 			responseChan := make(chan *types.ResponseAppendEntryRPC, len(s.peers))
 			for i := range s.rpcClients {
-				go func() {
+				go func(clientI interface{}) {
 					defer wg.Done()
-					client := s.rpcClients[i].(*rpc.Client)
+					client := clientI.(*rpc.Client)
 					request := &types.RequestAppendEntryRPC{
 						Term:                  clonedInst.CurrentTerm,
 						LeaderId:              clonedInst.serverId,
@@ -86,7 +79,7 @@ func (s *Server) sendPeriodicHeartBeats(ctx context.Context) {
 						response = &types.ResponseAppendEntryRPC{}
 					}
 					responseChan <- response
-				}()
+				}(s.rpcClients[i])
 			}
 			wg.Wait()
 
@@ -109,8 +102,8 @@ func (s *Server) sendPeriodicHeartBeats(ctx context.Context) {
 					"LeaderId":    updatedLeader,
 				}
 				s.update(updatedAttrs)
-				s.stopLeading()
-				go s.startFollowing()
+				s.updateState(constants.Leader, constants.Follower)
+				return
 			}
 
 			heartBeatTicker.ticker.Reset(time.Duration(config.GetTickerIntervalInMillisecond()) * time.Millisecond)
@@ -138,13 +131,15 @@ func (s *Server) makeAppendEntryCallsConcurrently(ctx context.Context) {
 					sugar.Debugf("Unable to get server index in peers list for : %s", serverId)
 				}
 
-				prevEntryIndex := clonedInst.NextIndex[serverIndex] - 1
-				// TODO: may have the check prevEntryIndex > 0
-				prevEntryTerm := clonedInst.Logs[prevEntryIndex].Term
 				bulkEntries := clonedInst.Logs[clonedInst.NextIndex[serverIndex]:]
-
 				if len(bulkEntries) == 0 {
 					continue
+				}
+
+				prevEntryTerm := 0
+				prevEntryIndex := clonedInst.NextIndex[serverIndex] - 1
+				if prevEntryIndex >= 0 {
+					prevEntryTerm = clonedInst.Logs[prevEntryIndex].Term
 				}
 
 				request := &types.RequestAppendEntryRPC{
@@ -156,7 +151,6 @@ func (s *Server) makeAppendEntryCallsConcurrently(ctx context.Context) {
 					LeaderLastCommitIndex: clonedInst.LastComittedIndex,
 				}
 
-				ctx, _ = context.WithCancel(ctx)
 				wg.Add(1)
 				go s.makeAppendEntryCall(ctx, client, prevEntryIndex, clonedInst.Logs, request, responseChan, wg)
 			}
@@ -166,15 +160,12 @@ func (s *Server) makeAppendEntryCallsConcurrently(ctx context.Context) {
 
 			for resp := range responseChan {
 				if !resp.Success && resp.OutdatedTerm {
-					// revert to being a follower
 					updatedAttrs := map[string]interface{}{
-						"State":       string(constants.Follower),
 						"LeaderId":    resp.CurrentLeader,
 						"CurrentTerm": resp.Term,
 					}
 					s.update(updatedAttrs)
-					go s.startFollowing()
-					s.stopLeading()
+					s.updateState(constants.Leader, constants.Follower)
 					return
 				}
 				// If successful: update nextIndex and matchIndex for the follower
