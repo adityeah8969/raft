@@ -2,11 +2,15 @@ package serverdb
 
 import (
 	"github.com/adityeah8969/raft/config"
+	"github.com/adityeah8969/raft/types"
+	"github.com/adityeah8969/raft/types/logEntry"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-type SqliteServerDb struct{}
+type SqliteServerDb struct {
+	db *gorm.DB
+}
 
 func (s *SqliteServerDb) GetServerDb() (*gorm.DB, error) {
 	configBytes, err := config.GetServerDbConfig()
@@ -21,4 +25,16 @@ func (s *SqliteServerDb) GetServerDb() (*gorm.DB, error) {
 		return nil, err
 	}
 	return sqliteDB, nil
+}
+
+func (s *SqliteServerDb) GetDB() *gorm.DB {
+	return s.db
+}
+
+func (s *SqliteServerDb) SaveVote(vote *types.Vote) error {
+	return s.db.Model(&types.Vote{}).Save(vote).Error
+}
+
+func (s *SqliteServerDb) SaveLogs(entries []logEntry.LogEntry) error {
+	return s.db.Model(&logEntry.LogEntry{}).Save(entries).Error
 }

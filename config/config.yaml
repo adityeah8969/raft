@@ -1,13 +1,30 @@
 StateMachineType: sqlite
 StateMachineConfig:
   SrcFileName: "/tmp/statemc.db"
-ServerId: server1
+
+ServerId: server-0
+
 ServerDbType: sqlite
+
 ServerDbConfig:
   SrcFileName: "/tmp/server.db"
-Peers: ['server2', 'server3', 'server4', 'server5']
+
+Peers:
+  - HostName: server-0
+    Address: 127.0.0.1
+  - HostName: server-1
+    Address: 127.0.0.1
+  - HostName: server-2
+    Address: 127.0.0.1
+  - HostName: server-3
+    Address: 127.0.0.1
+  - HostName: server-4
+    Address: 127.0.0.1
+
 TickerIntervalInMiliseconds: 150
 RetryRPCLimit: 5
 RPCTimeoutInSeconds: 10
 ClientRequestTimeoutInSeconds: 30
 ElectionTimerDurationInSeconds: 60
+MinElectionTimeOutInSeconds: 50
+MaxElectionTimeOutInSeconds: 100

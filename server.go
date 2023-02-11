@@ -2,38 +2,27 @@ package raft
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
-	"net/rpc"
 	"sync"
-	"time"
 
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types"
 	"github.com/adityeah8969/raft/types/constants"
 	"github.com/adityeah8969/raft/types/logEntry"
 	"github.com/adityeah8969/raft/types/logger"
+	"github.com/adityeah8969/raft/types/rpcClient"
 	serverdb "github.com/adityeah8969/raft/types/serverDb"
 	"github.com/adityeah8969/raft/types/stateMachine"
 	"github.com/adityeah8969/raft/util"
+
 	"github.com/huandu/go-clone"
 	"github.com/imdario/mergo"
+	"github.com/keegancsmith/rpc"
 	"go.uber.org/zap"
-	"gorm.io/gorm"
 )
-
-type ServerTicker struct {
-	ticker *time.Ticker
-	done   chan bool
-}
-
-type Vote struct {
-	gorm.Model
-	term     int
-	votedFor string
-}
 
 type processContext struct {
 	ctxMu  *sync.Mutex
@@ -41,44 +30,46 @@ type processContext struct {
 	cancel context.CancelFunc
 }
 
-type Server struct {
-	serverId string
-	// While working with peers we should ignore the current server
-	peers        []string
-	rpcClients   map[string]interface{}
-	stateMachine stateMachine.StateMachine
-	serverDb     *gorm.DB
+type Peer struct {
+	Hostname string
+	Address  string
+}
 
+type Server struct {
+	serverId          string
+	peers             []Peer
+	rpcClients        []rpcClient.RpcClientI
+	stateMachine      stateMachine.StateMachine
+	serverDb          serverdb.DAO
 	LeaderId          string
 	State             constants.ServerState
 	CurrentTerm       int
 	VotedFor          string
 	LastComittedIndex int
 	LastAppliedIndex  int
-	// next log entry to send to servers
-	NextIndex []int
-	// index of the highest log entry known to be replicated on server
-	MatchIndex   []int
-	Logs         []logEntry.LogEntry
-	ServerTicker *ServerTicker
+	NextIndex         []int
+	MatchIndex        []int
+	Logs              []logEntry.LogEntry
 }
 
 var serverInstance *Server
 var sugar *zap.SugaredLogger
 
 var serverCtx *processContext
-var serverMu sync.Mutex
+var serverMu sync.RWMutex
 
 var stateStartFunc map[constants.ServerState]func(context.Context)
 
 func init() {
 
-	serverDb, err := serverdb.GetServerDbInstance()
+	sugar = logger.GetLogger()
+
+	dbInst, err := serverdb.GetServerDbInstance()
 	if err != nil {
 		sugar.Fatalf("initializing server db: ", err)
 	}
 
-	err = migrateServerModels(serverDb)
+	err = serverdb.AutoMigrateModels(dbInst)
 	if err != nil {
 		sugar.Fatalf("migrating db models: ", err)
 	}
@@ -89,40 +80,42 @@ func init() {
 	}
 	// initializing the logs with a dummy entry, index > 0 will be considered as valid logs
 	logs := make([]logEntry.LogEntry, 0)
-	peers := config.GetPeers()
-	rpcClients := make(map[string]interface{}, len(peers))
+
+	peers, err := GetServerPeers()
+	if err != nil {
+		sugar.Fatalf("Fetching the server peers: ", err)
+	}
+
+	rpcClients := make([]rpcClient.RpcClientI, len(peers))
 	nextIndex := make([]int, len(peers))
 	matchIndex := make([]int, len(peers))
-	for index, peer := range peers {
-		client, err := rpc.DialHTTP("tcp", peer)
+
+	for _, peer := range peers {
+		client, err := rpcClient.GetRpcClient("tcp", peer.Address)
 		if err != nil {
-			sugar.Fatalf("dialing:", err)
+			sugar.Fatalw("initializing rpc client: ", "error", err)
 		}
-		rpcClients[peer] = client
+		index := util.GetServerIndex(peer.Hostname)
+		rpcClients[index] = client
 		nextIndex[index] = 1
 		matchIndex[index] = 0
 	}
-	serverTicker := &ServerTicker{
-		ticker: time.NewTicker(time.Duration(config.GetTickerIntervalInMillisecond()) * time.Millisecond),
-		done:   make(chan bool),
-	}
+
 	serverInstance = &Server{
 		serverId:          config.GetServerId(),
 		peers:             peers,
 		State:             constants.Follower,
-		serverDb:          serverDb,
+		serverDb:          dbInst,
 		stateMachine:      stateMcInst,
 		NextIndex:         nextIndex,
 		MatchIndex:        matchIndex,
 		Logs:              logs,
 		rpcClients:        rpcClients,
-		ServerTicker:      serverTicker,
 		CurrentTerm:       0,
 		VotedFor:          "",
 		LastComittedIndex: 0,
 		LastAppliedIndex:  0,
 	}
-	sugar = logger.GetLogger()
 
 	serverCtx = &processContext{
 		ctxMu: &sync.Mutex{},
@@ -133,6 +126,19 @@ func init() {
 		constants.Candidate: serverInstance.startContesting,
 		constants.Leader:    serverInstance.startLeading,
 	}
+}
+
+func GetServerPeers() ([]Peer, error) {
+	var peers []Peer
+	bytes, err := config.GetPeers()
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal(bytes, &peers)
+	if err != nil {
+		return nil, err
+	}
+	return peers, nil
 }
 
 func StartServing() error {
@@ -157,14 +163,6 @@ func StartServing() error {
 	return err
 }
 
-func migrateServerModels(db *gorm.DB) error {
-	err := db.AutoMigrate(&Vote{}, &logEntry.LogEntry{})
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVoteRPC) {
 
 	clonedInst := s.getClonedInst()
@@ -179,12 +177,22 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 		}
 		return
 	}
-	// 	Do not vote for the requesting candidate, if already voted
+
 	if clonedInst.CurrentTerm == req.Term && clonedInst.VotedFor != "" {
-		res = &types.ResponseVoteRPC{
-			VoteGranted: false,
+		// Deny vote
+		if clonedInst.VotedFor != req.CandidateId {
+			res = &types.ResponseVoteRPC{
+				VoteGranted: false,
+			}
+			return
 		}
-		return
+		// For idempotency
+		if clonedInst.VotedFor == req.CandidateId {
+			res = &types.ResponseVoteRPC{
+				VoteGranted: true,
+			}
+			return
+		}
 	}
 
 	if len(clonedInst.Logs) > 0 {
@@ -199,7 +207,7 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 	}
 
 	// Vote for the requesting candidate
-	err := s.serverDb.Model(&Vote{}).Save(Vote{term: req.Term, votedFor: req.CandidateId}).Error
+	err := s.serverDb.SaveVote(&types.Vote{Term: req.Term, VotedFor: req.CandidateId})
 	if err != nil {
 		res = &types.ResponseVoteRPC{
 			VoteGranted: false,
@@ -239,21 +247,12 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 			ServerId: clonedInst.serverId,
 			Success:  false,
 		}
-		updatedAttrs := map[string]interface{}{
-			"CurrentTerm": req.Term,
-			"LeaderId":    req.LeaderId,
-			"State":       constants.Follower,
-			"VotedFor":    "",
-		}
-		s.update(updatedAttrs)
-	}
-
-	if clonedInst.State != constants.Follower {
-		s.updateState(clonedInst.State, constants.Follower)
+		s.revertToFollower(req.Term, req.LeaderId)
+		return
 	}
 
 	if len(req.Entries) == 0 {
-		s.resetTicker()
+		s.resetFollowerTicker()
 		return
 	}
 
@@ -270,11 +269,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 		return
 	}
 
-	updatedAttrs := make(map[string]interface{})
-	updatedLogs := append(clonedInst.Logs, req.Entries...)
-	updatedAttrs["Logs"] = updatedLogs
-	updatedAttrs["LastComittedIndex"] = len(updatedLogs) - 1
-	s.update(updatedAttrs)
+	s.appendRPCEntriesToLogs(req.Entries)
 
 	// return success
 	res = &types.ResponseAppendEntryRPC{
@@ -282,7 +277,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 		Success:                      true,
 		CurrentLeader:                s.LeaderId,
 		Term:                         s.CurrentTerm,
-		LastCommittedIndexInFollower: len(updatedLogs) - 1,
+		LastCommittedIndexInFollower: s.LastComittedIndex,
 	}
 }
 
@@ -296,8 +291,8 @@ func (s *Server) update(updatedAttrs map[string]interface{}) error {
 }
 
 func (s *Server) getClonedInst() *Server {
-	serverMu.Lock()
-	defer serverMu.Unlock()
+	serverMu.RLock()
+	defer serverMu.RUnlock()
 	clonedInst := clone.Clone(serverInstance).(*Server)
 	return clonedInst
 }
@@ -371,7 +366,7 @@ func (s *Server) updateCommitIndex() error {
 		return nil
 	}
 
-	err := s.serverDb.Model(&logEntry.LogEntry{}).Save(logs[lastCommitIndex+1 : updatedCommitIndex+1]).Error
+	err := s.serverDb.SaveLogs(logs[lastCommitIndex+1 : updatedCommitIndex+1])
 	if err != nil {
 		return err
 	}
@@ -405,19 +400,10 @@ func (s *Server) trimInconsistentLogs(prevEntryIndex int, prevEntryTerm int) boo
 	return false
 }
 
-func (s *Server) resetTicker() {
-	serverMu.Lock()
-	defer serverMu.Unlock()
-	s.ServerTicker.ticker.Reset(util.GetRandomTickerDuration(config.GetTickerIntervalInMillisecond()))
-}
+func (s *Server) updateState(to constants.ServerState, updateAttrs map[string]interface{}) error {
 
-// can we take extra update attrs here
-func (s *Server) updateState(from constants.ServerState, to constants.ServerState) error {
-	clonedInst := s.getClonedInst()
-
-	if clonedInst.State != from {
-		sugar.Debugf("unable to change state", "serverId", clonedInst.serverId, "currentState", clonedInst.State, "expectedState", from, "finalState", to)
-		return fmt.Errorf(fmt.Sprintf("server in %v state cannot update state from %s to %s", clonedInst.State, from, to))
+	if updateAttrs != nil {
+		s.update(updateAttrs)
 	}
 
 	serverCtx.ctxMu.Lock()
@@ -436,4 +422,19 @@ func (s *Server) updateState(from constants.ServerState, to constants.ServerStat
 	go stateStartFunc[to](ctx)
 
 	return nil
+}
+
+func (s *Server) revertToFollower(updatedTerm int, updatedLeader string) {
+	updateAttrs := map[string]interface{}{
+		"LeaderId":    updatedLeader,
+		"CurrentTerm": updatedTerm,
+	}
+	s.updateState(constants.Follower, updateAttrs)
+}
+
+func (s *Server) revertToLeader() {
+	updateAttrs := map[string]interface{}{
+		"LeaderId": s.serverId,
+	}
+	s.updateState(constants.Candidate, updateAttrs)
 }

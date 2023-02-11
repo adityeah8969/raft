@@ -3,23 +3,23 @@ package raft
 import (
 	"context"
 	"math"
-	"net/rpc"
+
 	"sync"
 	"time"
 
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types"
-	"github.com/adityeah8969/raft/types/constants"
+	"github.com/adityeah8969/raft/types/rpcClient"
 	"github.com/adityeah8969/raft/util"
 )
 
 func (s *Server) voteForItself() error {
 	clonedInst := s.getClonedInst()
-	vote := &Vote{
-		votedFor: clonedInst.serverId,
-		term:     clonedInst.CurrentTerm + 1,
+	vote := &types.Vote{
+		VotedFor: clonedInst.serverId,
+		Term:     clonedInst.CurrentTerm + 1,
 	}
-	err := s.serverDb.Model(&Vote{}).Save(vote).Error
+	err := s.serverDb.SaveVote(vote)
 	if err != nil {
 		return err
 	}
@@ -31,76 +31,80 @@ func (s *Server) voteForItself() error {
 	return nil
 }
 
+func (s *Server) requestVoteFromPeers(ctx context.Context, responseChan chan *types.ResponseVoteRPC) {
+	defer close(responseChan)
+
+	clonedInst := s.getClonedInst()
+
+	var wg sync.WaitGroup
+	wg.Add(len(s.peers))
+
+	for ind, client := range clonedInst.rpcClients {
+
+		if clonedInst.serverId == util.GetServerId(ind) {
+			continue
+		}
+
+		go func(client rpcClient.RpcClientI) {
+			defer wg.Done()
+			request := &types.RequestVoteRPC{
+				Term:        clonedInst.CurrentTerm,
+				CandidateId: clonedInst.serverId,
+			}
+			response := &types.ResponseVoteRPC{}
+			err := client.MakeRPC(ctx, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
+			if err != nil {
+				sugar.Warnw("request vote RPC failed after retries", "candidate", clonedInst.serverId, "rpcClient", client, "request", request, "response", response)
+				response = &types.ResponseVoteRPC{
+					VoteGranted: false,
+				}
+			}
+			responseChan <- response
+		}(client)
+	}
+	wg.Wait()
+}
+
 func (s *Server) startContesting(ctx context.Context) {
 
-	electionTimer := time.NewTimer(time.Duration(config.GetElectionTimerDurationInSec()) * time.Second)
+	electionTimer := time.NewTimer(time.Duration(util.GetRandomInt(config.GetMaxElectionTimeOutInSec(), config.GetMinElectionTimeOutInSec())) * time.Second)
+
 	for {
 		select {
 		case <-ctx.Done():
 			sugar.Infof("server %s stopped contesting election", s.serverId)
+			return
 		case <-electionTimer.C:
 
+			voteCnt := 0
 			err := s.voteForItself()
 			if err != nil {
-				sugar.Debugf("server %s voted for itsefl", s.serverId)
+				sugar.Debugw("server %s voting for itsefl", "candidate id", s.serverId, "err", err)
+				continue
 			}
-
-			var wg sync.WaitGroup
-			wg.Add(len(s.peers))
+			voteCnt++
 
 			responseChan := make(chan *types.ResponseVoteRPC, len(s.peers))
+			go s.requestVoteFromPeers(ctx, responseChan)
 
-			for k := range s.rpcClients {
-				go func(clientI interface{}) {
-					defer wg.Done()
-					client := clientI.(*rpc.Client)
-					request := &types.RequestVoteRPC{
-						Term:        s.CurrentTerm,
-						CandidateId: s.serverId,
-					}
-					response := &types.ResponseVoteRPC{}
-					err := util.RPCWithRetry(client, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
-					if err != nil {
-						sugar.Warnw("request vote RPC failed after retries", "candidate", s.serverId, "rpcClient", client, "request", request, "response", response)
-						response = &types.ResponseVoteRPC{
-							VoteGranted: false,
-						}
-					}
-					responseChan <- response
-				}(s.rpcClients[k])
-			}
-			wg.Wait()
-			close(responseChan)
-
-			voteCnt := 0
 			for resp := range responseChan {
 				if resp.VoteGranted {
 					voteCnt++
+					if voteCnt >= int(math.Ceil(1.0*float64(len(s.peers)/2))) {
+						electionTimer.Stop()
+						s.revertToLeader()
+						return
+					}
 					continue
 				}
 				if resp.OutdatedTerm {
 					electionTimer.Stop()
-					updatedAttrs := map[string]interface{}{
-						"LeaderId":    resp.CurrentLeader,
-						"CurrentTerm": resp.Term,
-					}
-					s.update(updatedAttrs)
-					sugar.Infof("%s server had an outdated term as a candidate", s.serverId)
-					s.updateState(constants.Candidate, constants.Follower)
+					s.revertToFollower(resp.Term, resp.CurrentLeader)
 					return
 				}
 			}
 
-			if voteCnt >= int(math.Ceil(1.0*float64(len(s.peers)/2))) {
-				electionTimer.Stop()
-				updatedAttrs := map[string]interface{}{
-					"LeaderId": s.serverId,
-				}
-				s.update(updatedAttrs)
-				s.updateState(constants.Candidate, constants.Leader)
-				return
-			}
-			electionTimer.Reset(time.Duration(config.GetElectionTimerDurationInSec()) * time.Second)
+			electionTimer.Reset(time.Duration(util.GetRandomInt(config.GetMaxElectionTimeOutInSec(), config.GetMinElectionTimeOutInSec())) * time.Second)
 		}
 	}
 }

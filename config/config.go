@@ -13,19 +13,20 @@ const (
 	configFileType = "yaml"
 )
 
-// check if the memebers can be made private
+// check if the members can be made private
 type Config struct {
-	StateMachineType               string      `mapstructure:"StateMachineType"`
-	StateMachineConfig             interface{} `mapstructure:"StateMachineConfig"`
-	ServerDbType                   string      `mapstructure:"ServerDbType"`
-	ServerDBConfig                 interface{} `mapstructure:"ServerDbConfig"`
-	ServerId                       string      `mapstructure:"ServerId"`
-	Peers                          []string    `mapstructure:"Peers"`
-	TickerIntervalInMiliseconds    int         `mapstructure:"TickerIntervalInMiliseconds"`
-	RetryRPCLimit                  int         `mapstructure:"RetryRPCLimit"`
-	RPCTimeoutInSeconds            int         `mapstructure:"RPCTimeoutInSeconds"`
-	ClientRequestTimeoutInSeconds  int         `mapstructure:"ClientRequestTimeoutInSeconds"`
-	ElectionTimerDurationInSeconds int         `mapstructure:"ElectionTimerDurationInSeconds"`
+	StateMachineType              string      `mapstructure:"StateMachineType"`
+	StateMachineConfig            interface{} `mapstructure:"StateMachineConfig"`
+	ServerDbType                  string      `mapstructure:"ServerDbType"`
+	ServerDBConfig                interface{} `mapstructure:"ServerDbConfig"`
+	ServerId                      string      `mapstructure:"ServerId"`
+	Peers                         interface{} `mapstructure:"Peers"`
+	TickerIntervalInMiliseconds   int         `mapstructure:"TickerIntervalInMiliseconds"`
+	RetryRPCLimit                 int         `mapstructure:"RetryRPCLimit"`
+	RPCTimeoutInSeconds           int         `mapstructure:"RPCTimeoutInSeconds"`
+	ClientRequestTimeoutInSeconds int         `mapstructure:"ClientRequestTimeoutInSeconds"`
+	MinElectionTimeOutInSeconds   int         `mapstructure:"ElectionTimerDurationInSeconds"`
+	MaxElectionTimeOutInSeconds   int         `mapstructure:"MaxElectionTimeOutInSeconds"`
 }
 
 var config Config
@@ -70,8 +71,12 @@ func GetServerId() string {
 	return config.ServerId
 }
 
-func GetPeers() []string {
-	return config.Peers
+func GetPeers() ([]byte, error) {
+	bytes, err := json.Marshal(config.Peers)
+	if err != nil {
+		return nil, err
+	}
+	return bytes, nil
 }
 
 func GetServerDbType() string {
@@ -94,8 +99,12 @@ func GetClientRequestTimeoutInSeconds() int {
 	return config.ClientRequestTimeoutInSeconds
 }
 
-func GetElectionTimerDurationInSec() int {
-	return config.ElectionTimerDurationInSeconds
+func GetMinElectionTimeOutInSec() int {
+	return config.MinElectionTimeOutInSeconds
+}
+
+func GetMaxElectionTimeOutInSec() int {
+	return config.MaxElectionTimeOutInSeconds
 }
 
 type StateMachineConfig interface {

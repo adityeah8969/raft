@@ -9,14 +9,6 @@ type RequestVoteRPC struct {
 	LastLogIndex int
 }
 
-// type RequestAppendEntryRPC struct {
-// 	Term                  int
-// 	LeaderId              string
-// 	PrevEntry             *logEntry.LogEntry
-// 	Entries               []logEntry.LogEntry
-// 	LeaderLastCommitIndex int
-// }
-
 type RequestAppendEntryRPC struct {
 	Term                  int
 	LeaderId              string
@@ -26,5 +18,4 @@ type RequestAppendEntryRPC struct {
 	LeaderLastCommitIndex int
 }
 
-// Consider making this 'any' / 'interface{}' instead of mentioned fields
-type RequestEntry interface{}
+type RequestEntry any
