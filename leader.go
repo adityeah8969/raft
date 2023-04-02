@@ -22,11 +22,13 @@ const (
 var heartBeatRPCTicker *time.Ticker
 
 func (s *Server) prepareLeaderState() {
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	logs := s.Logs
+	serverMu.RUnlock()
 	updatedNextIndexSlice := make([]int, len(s.peers))
 	updatedMatchIndexSlice := make([]int, len(s.peers))
 	for i := range s.peers {
-		updatedNextIndexSlice[i] = len(clonedInst.Logs)
+		updatedNextIndexSlice[i] = len(logs)
 		updatedMatchIndexSlice[i] = 0
 	}
 	updatedAttrs := map[string]interface{}{
@@ -59,14 +61,15 @@ func (s *Server) sendPeriodicHeartBeats(ctx context.Context, leaderWg *sync.Wait
 			return
 		case <-heartBeatRPCTicker.C:
 
-			clonedInst := s.getClonedInst()
+			serverMu.RLock()
 			request := &types.RequestAppendEntryRPC{
-				Term:                  clonedInst.CurrentTerm,
-				LeaderId:              clonedInst.serverId,
-				LeaderLastCommitIndex: clonedInst.LastComittedIndex,
+				Term:                  s.CurrentTerm,
+				LeaderId:              s.serverId,
+				LeaderLastCommitIndex: s.LastComittedIndex,
 			}
+			serverMu.RUnlock()
 
-			responseChan := make(chan *types.ResponseAppendEntryRPC, len(s.peers))
+			responseChan := make(chan *types.ResponseAppendEntryRPC, len(s.peers)-1)
 			s.sendHeartBeatsToPeers(ctx, request, responseChan)
 
 			for resp := range responseChan {
@@ -84,17 +87,13 @@ func (s *Server) sendPeriodicHeartBeats(ctx context.Context, leaderWg *sync.Wait
 func (s *Server) sendHeartBeatsToPeers(ctx context.Context, req *types.RequestAppendEntryRPC, responseChan chan *types.ResponseAppendEntryRPC) {
 	defer close(responseChan)
 
-	clonedInst := s.getClonedInst()
-
 	wg := sync.WaitGroup{}
 	wg.Add(len(s.rpcClients))
 
-	for ind, client := range clonedInst.rpcClients {
-
-		if clonedInst.serverId == util.GetServerId(ind) {
+	for ind, client := range s.rpcClients {
+		if s.serverId == util.GetServerId(ind) {
 			continue
 		}
-
 		go func(client rpcClient.RpcClientI) {
 			defer wg.Done()
 			resp := &types.ResponseAppendEntryRPC{}
@@ -112,20 +111,21 @@ func (s *Server) sendHeartBeatsToPeers(ctx context.Context, req *types.RequestAp
 func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGroup) {
 	leaderWg.Done()
 
-	clonedInst := s.getClonedInst()
 	for {
 		select {
 		case <-ctx.Done():
-			sugar.Infof("%s stopped making append entry calls", clonedInst.serverId)
+			sugar.Infof("%s stopped making append entry calls", s.serverId)
 			return
 		default:
+
+			serverMu.Lock()
+			nextIndex := s.NextIndex
+			matchIndex := s.MatchIndex
+			logs := s.Logs
+			serverMu.RUnlock()
+
 			responseChan := make(chan *types.ResponseAppendEntryRPC, len(s.rpcClients))
-
 			s.makeAppendEntryCallToPeers(ctx, responseChan)
-
-			updatedNextIndex := clonedInst.NextIndex
-			updatedMatchIndex := clonedInst.MatchIndex
-
 			for resp := range responseChan {
 				if !resp.Success && resp.OutdatedTerm {
 					s.revertToFollower(resp.Term, resp.CurrentLeader)
@@ -133,16 +133,16 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 				}
 				// If successful: update nextIndex and matchIndex for the follower
 				serverIndex := util.GetServerIndex(resp.ServerId)
-				updatedNextIndex[serverIndex] = int(math.Min(float64(resp.LastCommittedIndexInFollower+1), float64(len(clonedInst.Logs)-1)))
-				updatedMatchIndex[serverIndex] = resp.LastCommittedIndexInFollower
+				nextIndex[serverIndex] = int(math.Min(float64(resp.LastCommittedIndexInFollower+1), float64(len(logs)-1)))
+				matchIndex[serverIndex] = resp.LastCommittedIndexInFollower
 			}
 			err := s.updateCommitIndex()
 			if err != nil {
 				sugar.Debugf("Updating commit index in %s: %v", s.serverId, err)
 			}
 			updatedAttrs := map[string]interface{}{
-				"NextIndex":  updatedNextIndex,
-				"MatchIndex": updatedMatchIndex,
+				"NextIndex":  nextIndex,
+				"MatchIndex": matchIndex,
 			}
 			s.update(updatedAttrs)
 		}
@@ -152,33 +152,39 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 func (s *Server) makeAppendEntryCallToPeers(ctx context.Context, responseChan chan *types.ResponseAppendEntryRPC) {
 	defer close(responseChan)
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	nextIndex := s.NextIndex
+	logs := s.Logs
+	currTerm := s.CurrentTerm
+	lastComittedIndex := s.LastComittedIndex
+	serverMu.RUnlock()
+
 	wg := sync.WaitGroup{}
-	wg.Add(len(clonedInst.rpcClients))
+	wg.Add(len(s.rpcClients))
 
-	for clientIndex := range clonedInst.rpcClients {
+	for clientIndex := range s.rpcClients {
 
-		if clonedInst.serverId == util.GetServerId(clientIndex) {
+		if s.serverId == util.GetServerId(clientIndex) {
 			continue
 		}
 
-		bulkEntries := clonedInst.Logs[clonedInst.NextIndex[clientIndex]:]
+		bulkEntries := logs[nextIndex[clientIndex]:]
 		if len(bulkEntries) == 0 {
 			continue
 		}
 
-		prevEntry := getPreviousEntry(clonedInst.Logs, clonedInst.NextIndex[clientIndex])
+		prevEntry := getPreviousEntry(logs, nextIndex[clientIndex])
 
 		request := &types.RequestAppendEntryRPC{
-			Term:                  clonedInst.CurrentTerm,
-			LeaderId:              clonedInst.serverId,
+			Term:                  currTerm,
+			LeaderId:              s.serverId,
 			PrevEntryIndex:        prevEntry.Index,
 			PrevEntryTerm:         prevEntry.Term,
 			Entries:               bulkEntries,
-			LeaderLastCommitIndex: clonedInst.LastComittedIndex,
+			LeaderLastCommitIndex: lastComittedIndex,
 		}
 
-		go s.makeAppendEntryCall(ctx, clientIndex, clonedInst.Logs, request, responseChan, &wg)
+		go s.makeAppendEntryCall(ctx, clientIndex, logs, request, responseChan, &wg)
 	}
 	wg.Wait()
 }
@@ -187,7 +193,7 @@ func (s *Server) makeAppendEntryCallToPeers(ctx context.Context, responseChan ch
 If followers crash or run slowly, or if network packets are lost, the leader retries Append-
 Entries RPCs indefinitely (even after it has responded to the client)
 
-So increasing the retry count willl help here but there is always a high finite limit to it??
+So increasing the retry count will help here but there is always a high finite limit to it??
 Should we drop the retry and keep trying indefinitely?
 */
 
@@ -219,25 +225,29 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 
 func (s *Server) Set(req *types.RequestEntry, resp *types.ResponseEntry) {
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	leaderId := s.LeaderId
+	logs := s.Logs
+	lastAppliedIndex := s.LastAppliedIndex
+	serverMu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.GetClientRequestTimeoutInSeconds())*time.Second)
 	defer cancel()
 
-	if clonedInst.LeaderId != clonedInst.serverId {
+	if leaderId != s.serverId {
 		s.redirectRequestToLeader(ctx, "Server.Set", req, resp)
 		return
 	}
 
-	logIndex := len(clonedInst.Logs)
+	logIndex := len(logs)
 	s.appendReqToLogs(req)
 
 	// We need a way to synchronously send the response back to the client after the entry is applied to the state machine.
 	// Just check if the entry has been applied, let it be a blocking call (As per the raft paper).
 
-	err := waitTillApply(ctx, clonedInst.LastAppliedIndex, logIndex)
+	err := waitTillApply(ctx, lastAppliedIndex, logIndex)
 	if err != nil {
-		sugar.Debugw("wait till log gets applied to state machine", "error", err, "leaderId", clonedInst.LeaderId, "log entry", req)
+		sugar.Debugw("wait till log gets applied to state machine", "error", err, "leaderId", leaderId, "log entry", req)
 		resp = &types.ResponseEntry{
 			Success: false,
 			Err:     err,
@@ -251,13 +261,15 @@ func (s *Server) Set(req *types.RequestEntry, resp *types.ResponseEntry) {
 
 func (s *Server) Get(req *types.RequestEntry, resp *types.ResponseEntry) {
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	leaderId := s.LeaderId
+	serverMu.RUnlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// re-direct to leader
-	if clonedInst.LeaderId != clonedInst.serverId {
+	if leaderId != s.serverId {
 		s.redirectRequestToLeader(ctx, "Server.Get", req, resp)
 		return
 	}
@@ -281,11 +293,13 @@ func (s *Server) Get(req *types.RequestEntry, resp *types.ResponseEntry) {
 
 func (s *Server) redirectRequestToLeader(ctx context.Context, method string, req *types.RequestEntry, resp *types.ResponseEntry) {
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	leaderId := s.LeaderId
+	serverMu.RUnlock()
 
 	// re-direct to leader
-	if clonedInst.LeaderId != clonedInst.serverId {
-		client := clonedInst.rpcClients[util.GetServerIndex(clonedInst.LeaderId)]
+	if leaderId != s.serverId {
+		client := s.rpcClients[util.GetServerIndex(leaderId)]
 		response := &types.ResponseEntry{}
 		err := client.MakeRPC(ctx, method, req, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
 		if err != nil {

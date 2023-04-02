@@ -22,8 +22,10 @@ Peers:
     Address: 127.0.0.1
 
 TickerIntervalInMiliseconds: 150
-RetryRPCLimit: 5
-RPCTimeoutInSeconds: 10
+
+RetryRPCLimit: 10000
+RPCTimeoutInSeconds: 86400
+
 ClientRequestTimeoutInSeconds: 30
 ElectionTimerDurationInSeconds: 60
 MinElectionTimeOutInSeconds: 50

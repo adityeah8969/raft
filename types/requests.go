@@ -18,4 +18,4 @@ type RequestAppendEntryRPC struct {
 	LeaderLastCommitIndex int
 }
 
-type RequestEntry any
+type RequestEntry interface{}

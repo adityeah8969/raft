@@ -6,10 +6,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// type ServerDb interface {
-// 	GetServerDb() (*gorm.DB, error)
-// }
-
 type DAO interface {
 	GetDB() *gorm.DB
 	SaveVote(*types.Vote) error

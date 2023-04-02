@@ -18,7 +18,6 @@ import (
 	"github.com/adityeah8969/raft/types/stateMachine"
 	"github.com/adityeah8969/raft/util"
 
-	"github.com/huandu/go-clone"
 	"github.com/imdario/mergo"
 	"github.com/keegancsmith/rpc"
 	"go.uber.org/zap"
@@ -36,7 +35,8 @@ type Peer struct {
 }
 
 type Server struct {
-	serverId          string
+	serverId string
+	// Tight Coupling
 	peers             []Peer
 	rpcClients        []rpcClient.RpcClientI
 	stateMachine      stateMachine.StateMachine
@@ -49,7 +49,8 @@ type Server struct {
 	LastAppliedIndex  int
 	NextIndex         []int
 	MatchIndex        []int
-	Logs              []logEntry.LogEntry
+	// Tight Coupling
+	Logs []logEntry.LogEntry
 }
 
 var serverInstance *Server
@@ -165,29 +166,36 @@ func StartServing() error {
 
 func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVoteRPC) {
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+
+	leaderId := s.LeaderId
+	currTerm := s.CurrentTerm
+	votedFor := s.VotedFor
+	logs := s.Logs
+
+	serverMu.RUnlock()
 
 	// 	Notify that the requesting candidate should step back.
-	if clonedInst.CurrentTerm > req.Term {
+	if currTerm > req.Term {
 		res = &types.ResponseVoteRPC{
 			VoteGranted:   false,
 			OutdatedTerm:  true,
-			CurrentLeader: clonedInst.LeaderId,
-			Term:          clonedInst.CurrentTerm,
+			CurrentLeader: leaderId,
+			Term:          currTerm,
 		}
 		return
 	}
 
-	if clonedInst.CurrentTerm == req.Term && clonedInst.VotedFor != "" {
+	if currTerm == req.Term && votedFor != "" {
 		// Deny vote
-		if clonedInst.VotedFor != req.CandidateId {
+		if votedFor != req.CandidateId {
 			res = &types.ResponseVoteRPC{
 				VoteGranted: false,
 			}
 			return
 		}
 		// For idempotency
-		if clonedInst.VotedFor == req.CandidateId {
+		if votedFor == req.CandidateId {
 			res = &types.ResponseVoteRPC{
 				VoteGranted: true,
 			}
@@ -195,9 +203,9 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 		}
 	}
 
-	if len(clonedInst.Logs) > 0 {
-		lastServerLog := clonedInst.Logs[len(clonedInst.Logs)-1]
-		// Deny, if the candidates logs are not updated enough
+	// Deny if the candidates logs are not updated enough
+	if len(logs) > 0 {
+		lastServerLog := logs[len(logs)-1]
 		if lastServerLog.Term > req.LastLogTerm || (lastServerLog.Term == req.LastLogTerm && lastServerLog.Index > req.LastLogIndex) {
 			res = &types.ResponseVoteRPC{
 				VoteGranted: false,
@@ -229,30 +237,51 @@ func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVo
 
 func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.ResponseAppendEntryRPC) {
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	currTerm := s.CurrentTerm
+	leaderId := s.LeaderId
+	logs := s.Logs
+	lastComittedIndex := s.LastComittedIndex
+	serverMu.RUnlock()
 
 	// report outdated term in the request
-	if clonedInst.CurrentTerm > req.Term {
+	if currTerm > req.Term {
 		res = &types.ResponseAppendEntryRPC{
-			ServerId:      clonedInst.serverId,
+			ServerId:      s.serverId,
 			Success:       false,
 			OutdatedTerm:  true,
-			CurrentLeader: clonedInst.LeaderId,
+			CurrentLeader: leaderId,
 		}
 		return
 	}
 
-	if clonedInst.CurrentTerm < req.Term {
+	// revert to follower in case the current term is less than the one in the request
+	if currTerm < req.Term {
 		res = &types.ResponseAppendEntryRPC{
-			ServerId: clonedInst.serverId,
+			ServerId: s.serverId,
 			Success:  false,
 		}
 		s.revertToFollower(req.Term, req.LeaderId)
 		return
 	}
 
+	// heartbeat
 	if len(req.Entries) == 0 {
 		s.resetFollowerTicker()
+		return
+	}
+
+	removeDupicateEntriesFromRequest(req.Entries, logs, req)
+
+	// Achieving Idempotency
+	if len(req.Entries) == 0 {
+		res = &types.ResponseAppendEntryRPC{
+			ServerId:                     s.serverId,
+			Success:                      true,
+			CurrentLeader:                leaderId,
+			Term:                         currTerm,
+			LastCommittedIndexInFollower: lastComittedIndex,
+		}
 		return
 	}
 
@@ -260,24 +289,30 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 	ok := s.trimInconsistentLogs(req.PrevEntryIndex, req.PrevEntryTerm)
 	if !ok {
 		res = &types.ResponseAppendEntryRPC{
-			ServerId:            clonedInst.serverId,
+			ServerId:            s.serverId,
 			Success:             false,
 			OutdatedTerm:        false,
-			CurrentLeader:       clonedInst.LeaderId,
+			CurrentLeader:       leaderId,
 			PreviousEntryAbsent: true,
 		}
 		return
 	}
 
+	// Append Entries
 	s.appendRPCEntriesToLogs(req.Entries)
+	updatedLastCommitIndex := req.LeaderLastCommitIndex
+	updatedAttrs := map[string]interface{}{
+		"LastComittedIndex": updatedLastCommitIndex,
+	}
+	s.update(updatedAttrs)
 
 	// return success
 	res = &types.ResponseAppendEntryRPC{
 		ServerId:                     s.serverId,
 		Success:                      true,
-		CurrentLeader:                s.LeaderId,
-		Term:                         s.CurrentTerm,
-		LastCommittedIndexInFollower: s.LastComittedIndex,
+		CurrentLeader:                leaderId,
+		Term:                         currTerm,
+		LastCommittedIndexInFollower: updatedLastCommitIndex,
 	}
 }
 
@@ -288,13 +323,6 @@ func (s *Server) update(updatedAttrs map[string]interface{}) error {
 		return err
 	}
 	return nil
-}
-
-func (s *Server) getClonedInst() *Server {
-	serverMu.RLock()
-	defer serverMu.RUnlock()
-	clonedInst := clone.Clone(serverInstance).(*Server)
-	return clonedInst
 }
 
 func (s *Server) applyEntries(ctx context.Context) {
@@ -314,13 +342,16 @@ func (s *Server) applyEntries(ctx context.Context) {
 
 func (s *Server) applyEntriesToStateMachine() error {
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	lastComittedIndex := s.LastComittedIndex
+	lastAppliedIndex := s.LastAppliedIndex
+	serverMu.RUnlock()
 
-	if clonedInst.LastComittedIndex <= clonedInst.LastAppliedIndex {
+	if lastComittedIndex <= lastAppliedIndex {
 		return nil
 	}
 
-	batchEntries := s.Logs[clonedInst.LastAppliedIndex+1 : clonedInst.LastComittedIndex+1]
+	batchEntries := s.Logs[lastAppliedIndex+1 : lastComittedIndex+1]
 
 	if len(batchEntries) == 0 {
 		return nil
@@ -332,7 +363,7 @@ func (s *Server) applyEntriesToStateMachine() error {
 	}
 
 	updatedAttrs := map[string]interface{}{
-		"LastAppliedIndex": clonedInst.LastComittedIndex,
+		"LastAppliedIndex": lastComittedIndex,
 	}
 	s.update(updatedAttrs)
 
@@ -341,17 +372,18 @@ func (s *Server) applyEntriesToStateMachine() error {
 
 func (s *Server) updateCommitIndex() error {
 
-	clonedInst := s.getClonedInst()
-
-	logs := clonedInst.Logs
-	lastCommitIndex := clonedInst.LastComittedIndex
-	currTerm := clonedInst.CurrentTerm
-	peers := clonedInst.peers
+	serverMu.RLock()
+	logs := s.Logs
+	lastCommitIndex := s.LastComittedIndex
+	currTerm := s.CurrentTerm
+	peers := s.peers
+	matchIndex := s.MatchIndex
+	serverMu.RUnlock()
 
 	var updatedCommitIndex int
 	for i := len(logs) - 1; i > lastCommitIndex; i-- {
 		cnt := 0
-		for _, matchIndex := range clonedInst.MatchIndex {
+		for _, matchIndex := range matchIndex {
 			if matchIndex >= i {
 				cnt++
 			}
@@ -380,7 +412,10 @@ func (s *Server) updateCommitIndex() error {
 
 func (s *Server) trimInconsistentLogs(prevEntryIndex int, prevEntryTerm int) bool {
 
-	logs := s.getClonedInst().Logs
+	serverMu.RLock()
+	logs := s.Logs
+	serverMu.RUnlock()
+
 	updatedAttrs := make(map[string]interface{}, 0)
 
 	if prevEntryIndex == -1 {
@@ -437,4 +472,17 @@ func (s *Server) revertToLeader() {
 		"LeaderId": s.serverId,
 	}
 	s.updateState(constants.Candidate, updateAttrs)
+}
+
+func removeDupicateEntriesFromRequest(entries []logEntry.LogEntry, logs []logEntry.LogEntry, req *types.RequestAppendEntryRPC) {
+	for _, entry := range entries {
+		if entry.Index > len(logs)-1 || logs[entry.Index] != entry {
+			break
+		}
+		if logs[entry.Index] == entry {
+			req.PrevEntryIndex++
+			req.PrevEntryTerm++
+		}
+	}
+	req.Entries = req.Entries[req.PrevEntryIndex+1:]
 }

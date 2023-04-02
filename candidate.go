@@ -14,18 +14,23 @@ import (
 )
 
 func (s *Server) voteForItself() error {
-	clonedInst := s.getClonedInst()
+
+	serverMu.RLock()
+	serverId := s.serverId
+	currTerm := s.CurrentTerm
+	serverMu.RUnlock()
+
 	vote := &types.Vote{
-		VotedFor: clonedInst.serverId,
-		Term:     clonedInst.CurrentTerm + 1,
+		VotedFor: serverId,
+		Term:     currTerm + 1,
 	}
 	err := s.serverDb.SaveVote(vote)
 	if err != nil {
 		return err
 	}
 	updatedAttrs := map[string]interface{}{
-		"CurrentTerm": clonedInst.CurrentTerm + 1,
-		"VotedFor":    clonedInst.serverId,
+		"CurrentTerm": currTerm + 1,
+		"VotedFor":    serverId,
 	}
 	s.update(updatedAttrs)
 	return nil
@@ -34,27 +39,27 @@ func (s *Server) voteForItself() error {
 func (s *Server) requestVoteFromPeers(ctx context.Context, responseChan chan *types.ResponseVoteRPC) {
 	defer close(responseChan)
 
-	clonedInst := s.getClonedInst()
+	serverMu.RLock()
+	currTerm := s.CurrentTerm
+	serverMu.RUnlock()
 
 	var wg sync.WaitGroup
 	wg.Add(len(s.peers))
 
-	for ind, client := range clonedInst.rpcClients {
-
-		if clonedInst.serverId == util.GetServerId(ind) {
+	for ind, client := range s.rpcClients {
+		if s.serverId == util.GetServerId(ind) {
 			continue
 		}
-
 		go func(client rpcClient.RpcClientI) {
 			defer wg.Done()
 			request := &types.RequestVoteRPC{
-				Term:        clonedInst.CurrentTerm,
-				CandidateId: clonedInst.serverId,
+				Term:        currTerm,
+				CandidateId: s.serverId,
 			}
 			response := &types.ResponseVoteRPC{}
 			err := client.MakeRPC(ctx, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
 			if err != nil {
-				sugar.Warnw("request vote RPC failed after retries", "candidate", clonedInst.serverId, "rpcClient", client, "request", request, "response", response)
+				sugar.Warnw("request vote RPC failed after retries", "candidate", s.serverId, "rpcClient", client, "request", request, "response", response)
 				response = &types.ResponseVoteRPC{
 					VoteGranted: false,
 				}
@@ -84,7 +89,7 @@ func (s *Server) startContesting(ctx context.Context) {
 			}
 			voteCnt++
 
-			responseChan := make(chan *types.ResponseVoteRPC, len(s.peers))
+			responseChan := make(chan *types.ResponseVoteRPC, len(s.peers)-1)
 			go s.requestVoteFromPeers(ctx, responseChan)
 
 			for resp := range responseChan {

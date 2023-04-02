@@ -10,12 +10,6 @@ import (
 	"github.com/adityeah8969/raft/types/logEntry"
 )
 
-// var sugar *zap.SugaredLogger
-
-// func init() {
-// 	sugar = logger.GetLogger()
-// }
-
 func GetRandomInt(max int, min int) int {
 	return rand.Intn(max-min) + min
 }
