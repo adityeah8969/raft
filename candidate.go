@@ -57,7 +57,7 @@ func (s *Server) requestVoteFromPeers(ctx context.Context, responseChan chan *ty
 				CandidateId: s.serverId,
 			}
 			response := &types.ResponseVoteRPC{}
-			err := client.MakeRPC(ctx, "Server.RequestVoteRPC", request, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
+			err := client.MakeRPC(ctx, "Server.RequestVoteRPC", request, response, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
 			if err != nil {
 				sugar.Warnw("request vote RPC failed after retries", "candidate", s.serverId, "rpcClient", client, "request", request, "response", response)
 				response = &types.ResponseVoteRPC{

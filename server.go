@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/adityeah8969/raft/types/constants"
 	"github.com/adityeah8969/raft/types/logEntry"
 	"github.com/adityeah8969/raft/types/logger"
+	"github.com/adityeah8969/raft/types/peer"
 	"github.com/adityeah8969/raft/types/rpcClient"
 	serverdb "github.com/adityeah8969/raft/types/serverDb"
 	"github.com/adityeah8969/raft/types/stateMachine"
@@ -29,15 +31,9 @@ type processContext struct {
 	cancel context.CancelFunc
 }
 
-type Peer struct {
-	Hostname string
-	Address  string
-}
-
 type Server struct {
-	serverId string
-	// Tight Coupling
-	peers             []Peer
+	serverId          string
+	peers             []peer.Peer
 	rpcClients        []rpcClient.RpcClientI
 	stateMachine      stateMachine.StateMachine
 	serverDb          serverdb.DAO
@@ -49,16 +45,13 @@ type Server struct {
 	LastAppliedIndex  int
 	NextIndex         []int
 	MatchIndex        []int
-	// Tight Coupling
-	Logs []logEntry.LogEntry
+	Logs              []logEntry.LogEntry
 }
 
 var serverInstance *Server
 var sugar *zap.SugaredLogger
-
 var serverCtx *processContext
 var serverMu sync.RWMutex
-
 var stateStartFunc map[constants.ServerState]func(context.Context)
 
 func init() {
@@ -92,7 +85,7 @@ func init() {
 	matchIndex := make([]int, len(peers))
 
 	for _, peer := range peers {
-		client, err := rpcClient.GetRpcClient("tcp", peer.Address)
+		client, err := rpcClient.GetRpcClient("tcp", fmt.Sprintf("%s:%d", peer.Address, config.GetAppPort()))
 		if err != nil {
 			sugar.Fatalw("initializing rpc client: ", "error", err)
 		}
@@ -129,8 +122,8 @@ func init() {
 	}
 }
 
-func GetServerPeers() ([]Peer, error) {
-	var peers []Peer
+func GetServerPeers() ([]peer.Peer, error) {
+	var peers []peer.Peer
 	bytes, err := config.GetPeers()
 	if err != nil {
 		return nil, err
@@ -145,7 +138,7 @@ func GetServerPeers() ([]Peer, error) {
 func StartServing() error {
 	rpc.Register(serverInstance)
 	rpc.HandleHTTP()
-	l, err := net.Listen("tcp", ":8089")
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", config.GetAppPort()))
 	if err != nil {
 		return err
 	}

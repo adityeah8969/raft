@@ -1,29 +1,30 @@
-StateMachineType: sqlite
-StateMachineConfig:
-  SrcFileName: "/tmp/statemc.db"
-
 ServerId: server-0
 
-ServerDbType: sqlite
+Port: 8089
 
+StateMachineType: sqlite
+StateMachineConfig:
+  SrcFileName: "/tmp/raft-data/statemc.db"
+
+ServerDbType: sqlite
 ServerDbConfig:
-  SrcFileName: "/tmp/server.db"
+  SrcFileName: "/tmp/raft-data/server.db"
 
 Peers:
   - HostName: server-0
-    Address: 127.0.0.1
+    Address: server-0
   - HostName: server-1
-    Address: 127.0.0.1
+    Address: server-1
   - HostName: server-2
-    Address: 127.0.0.1
+    Address: server-2
   - HostName: server-3
-    Address: 127.0.0.1
+    Address: server-3
   - HostName: server-4
-    Address: 127.0.0.1
+    Address: server-4
 
 TickerIntervalInMiliseconds: 150
 
-RetryRPCLimit: 10000
+RpcRetryLimit: 10000
 RPCTimeoutInSeconds: 86400
 
 ClientRequestTimeoutInSeconds: 30

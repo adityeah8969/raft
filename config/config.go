@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	configFilePath = "."
+	configFilePath = "/home/aditya/workspace/repos/raft/config"
 	configFileName = "config"
 	configFileType = "yaml"
 )
@@ -22,11 +22,12 @@ type Config struct {
 	ServerId                      string      `mapstructure:"ServerId"`
 	Peers                         interface{} `mapstructure:"Peers"`
 	TickerIntervalInMiliseconds   int         `mapstructure:"TickerIntervalInMiliseconds"`
-	RetryRPCLimit                 int         `mapstructure:"RetryRPCLimit"`
+	RpcRetryLimit                 int         `mapstructure:"RpcRetryLimit"`
 	RPCTimeoutInSeconds           int         `mapstructure:"RPCTimeoutInSeconds"`
 	ClientRequestTimeoutInSeconds int         `mapstructure:"ClientRequestTimeoutInSeconds"`
 	MinElectionTimeOutInSeconds   int         `mapstructure:"ElectionTimerDurationInSeconds"`
 	MaxElectionTimeOutInSeconds   int         `mapstructure:"MaxElectionTimeOutInSeconds"`
+	Port                          int         `mapstructure:"MaxElectionTimeOutInSeconds"`
 }
 
 var config Config
@@ -87,8 +88,8 @@ func GetTickerIntervalInMillisecond() int {
 	return config.TickerIntervalInMiliseconds
 }
 
-func GetRetryRPCLimit() int {
-	return config.RetryRPCLimit
+func GetRpcRetryLimit() int {
+	return config.RpcRetryLimit
 }
 
 func GetRPCTimeoutInSeconds() int {
@@ -105,6 +106,10 @@ func GetMinElectionTimeOutInSec() int {
 
 func GetMaxElectionTimeOutInSec() int {
 	return config.MaxElectionTimeOutInSeconds
+}
+
+func GetAppPort() int {
+	return config.Port
 }
 
 type StateMachineConfig interface {

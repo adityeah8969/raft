@@ -1,0 +1,32 @@
+version: "3.9"  # optional since v1.27.0
+services:
+  server-0:
+    build: .
+    ports:
+      - "8080:8089"
+    volumes:
+      - /home/aditya/workspace/playground/others/random_test/raft-data/server-0:/tmp/raft-data
+  server-1:
+    build: .
+    ports:
+      - "8081:8089"
+    volumes:
+      - /home/aditya/workspace/playground/others/random_test/raft-data/server-1:/tmp/raft-data
+  server-2:
+    build: .
+    ports:
+      - "8082:8089"
+    volumes:
+      - /home/aditya/workspace/playground/others/random_test/raft-data/server-2:/tmp/raft-data
+  server-3:
+    build: .
+    ports:
+      - "8083:8089"
+    volumes:
+      - /home/aditya/workspace/playground/others/random_test/raft-data/server-3:/tmp/raft-data
+  server-4:
+    build: .
+    ports:
+      - "8084:8089"
+    volumes:
+      - /home/aditya/workspace/playground/others/random_test/raft-data/server-4:/tmp/raft-data

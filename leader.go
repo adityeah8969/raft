@@ -97,7 +97,7 @@ func (s *Server) sendHeartBeatsToPeers(ctx context.Context, req *types.RequestAp
 		go func(client rpcClient.RpcClientI) {
 			defer wg.Done()
 			resp := &types.ResponseAppendEntryRPC{}
-			err := client.MakeRPC(ctx, "Server.AppendEntryRPC", req, resp, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
+			err := client.MakeRPC(ctx, "Server.AppendEntryRPC", req, resp, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
 			if err != nil {
 				sugar.Warnw("RPC resulted in error after retries", "rpcClient", client, "leaderId", req.LeaderId)
 				return
@@ -202,7 +202,7 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 	response := &types.ResponseAppendEntryRPC{}
 	for {
 		client := s.rpcClients[clientIndex]
-		err := client.MakeRPC(ctx, "Server.AppendEntryRPC", request, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
+		err := client.MakeRPC(ctx, "Server.AppendEntryRPC", request, response, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
 		if err != nil {
 			sugar.Warnw("append entry RPC calls failed", "Error", err, "leaderId", s.serverId, "rpcClient", client)
 			response = &types.ResponseAppendEntryRPC{}
@@ -301,7 +301,7 @@ func (s *Server) redirectRequestToLeader(ctx context.Context, method string, req
 	if leaderId != s.serverId {
 		client := s.rpcClients[util.GetServerIndex(leaderId)]
 		response := &types.ResponseEntry{}
-		err := client.MakeRPC(ctx, method, req, response, config.GetRetryRPCLimit(), config.GetRPCTimeoutInSeconds())
+		err := client.MakeRPC(ctx, method, req, response, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
 		if err != nil {
 			sugar.Warnw("set entry failed after retries", "serverId", s.serverId, "leaderId", s.LeaderId, "rpcClient", client, "request", req, "response", response)
 			response = &types.ResponseEntry{
