@@ -36,7 +36,7 @@ func (s *Server) prepareLeaderState() {
 		"MatchIndex": updatedMatchIndexSlice,
 		"State":      constants.Leader,
 	}
-	heartBeatRPCTicker = time.NewTicker(time.Duration(config.GetTickerIntervalInMillisecond()) * time.Millisecond)
+	heartBeatRPCTicker = time.NewTicker(time.Duration(config.GetHeartBeatTickerIntervalInMilliseconds()) * time.Millisecond)
 	s.update(updatedAttrs)
 }
 
@@ -79,7 +79,7 @@ func (s *Server) sendPeriodicHeartBeats(ctx context.Context, leaderWg *sync.Wait
 				}
 			}
 
-			heartBeatRPCTicker.Reset(time.Duration(config.GetTickerIntervalInMillisecond()) * time.Millisecond)
+			heartBeatRPCTicker.Reset(time.Duration(config.GetHeartBeatTickerIntervalInMilliseconds()) * time.Millisecond)
 		}
 	}
 }
@@ -97,7 +97,7 @@ func (s *Server) sendHeartBeatsToPeers(ctx context.Context, req *types.RequestAp
 		go func(client rpcClient.RpcClientI) {
 			defer wg.Done()
 			resp := &types.ResponseAppendEntryRPC{}
-			err := client.MakeRPC(ctx, "Server.AppendEntryRPC", req, resp, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
+			err := client.MakeRPC(ctx, "Server.AppendEntryRPC", req, resp, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
 			if err != nil {
 				sugar.Warnw("RPC resulted in error after retries", "rpcClient", client, "leaderId", req.LeaderId)
 				return
@@ -202,7 +202,7 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 	response := &types.ResponseAppendEntryRPC{}
 	for {
 		client := s.rpcClients[clientIndex]
-		err := client.MakeRPC(ctx, "Server.AppendEntryRPC", request, response, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
+		err := client.MakeRPC(ctx, "Server.AppendEntryRPC", request, response, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
 		if err != nil {
 			sugar.Warnw("append entry RPC calls failed", "Error", err, "leaderId", s.serverId, "rpcClient", client)
 			response = &types.ResponseAppendEntryRPC{}
@@ -223,7 +223,7 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 	}
 }
 
-func (s *Server) Set(req *types.RequestEntry, resp *types.ResponseEntry) {
+func (s *Server) Set(ctx context.Context, req *types.RequestEntry, resp *types.ResponseEntry) error {
 
 	serverMu.RLock()
 	leaderId := s.LeaderId
@@ -235,8 +235,7 @@ func (s *Server) Set(req *types.RequestEntry, resp *types.ResponseEntry) {
 	defer cancel()
 
 	if leaderId != s.serverId {
-		s.redirectRequestToLeader(ctx, "Server.Set", req, resp)
-		return
+		return s.redirectRequestToLeader(ctx, "Server.Set", req, resp)
 	}
 
 	logIndex := len(logs)
@@ -252,14 +251,15 @@ func (s *Server) Set(req *types.RequestEntry, resp *types.ResponseEntry) {
 			Success: false,
 			Err:     err,
 		}
-		return
+		return err
 	}
 	resp = &types.ResponseEntry{
 		Success: true,
 	}
+	return nil
 }
 
-func (s *Server) Get(req *types.RequestEntry, resp *types.ResponseEntry) {
+func (s *Server) Get(ctx context.Context, req *types.RequestEntry, resp *types.ResponseEntry) error {
 
 	serverMu.RLock()
 	leaderId := s.LeaderId
@@ -270,8 +270,7 @@ func (s *Server) Get(req *types.RequestEntry, resp *types.ResponseEntry) {
 
 	// re-direct to leader
 	if leaderId != s.serverId {
-		s.redirectRequestToLeader(ctx, "Server.Get", req, resp)
-		return
+		return s.redirectRequestToLeader(ctx, "Server.Get", req, resp)
 	}
 
 	log := &logEntry.LogEntry{Entry: req}
@@ -282,6 +281,7 @@ func (s *Server) Get(req *types.RequestEntry, resp *types.ResponseEntry) {
 			Success: false,
 			Err:     err,
 		}
+		return err
 	}
 
 	resp = &types.ResponseEntry{
@@ -289,9 +289,11 @@ func (s *Server) Get(req *types.RequestEntry, resp *types.ResponseEntry) {
 		Err:     nil,
 		Data:    logEntry,
 	}
+
+	return nil
 }
 
-func (s *Server) redirectRequestToLeader(ctx context.Context, method string, req *types.RequestEntry, resp *types.ResponseEntry) {
+func (s *Server) redirectRequestToLeader(ctx context.Context, method string, req *types.RequestEntry, resp *types.ResponseEntry) error {
 
 	serverMu.RLock()
 	leaderId := s.LeaderId
@@ -301,15 +303,18 @@ func (s *Server) redirectRequestToLeader(ctx context.Context, method string, req
 	if leaderId != s.serverId {
 		client := s.rpcClients[util.GetServerIndex(leaderId)]
 		response := &types.ResponseEntry{}
-		err := client.MakeRPC(ctx, method, req, response, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
+		err := client.MakeRPC(ctx, method, req, response, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
 		if err != nil {
 			sugar.Warnw("set entry failed after retries", "serverId", s.serverId, "leaderId", s.LeaderId, "rpcClient", client, "request", req, "response", response)
 			response = &types.ResponseEntry{
 				Success: false,
 				Err:     err,
 			}
+			return err
 		}
 	}
+
+	return nil
 }
 
 func (s *Server) appendReqToLogs(req *types.RequestEntry) {

@@ -10,6 +10,12 @@ import (
 )
 
 var followerTicker *time.Ticker
+var minTickerIntervalInMs, maxTickerIntervalInMs int
+
+func init() {
+	minTickerIntervalInMs = config.GetMinTickerIntervalInMillisecond()
+	maxTickerIntervalInMs = config.GetMaxTickerIntervalInMillisecond()
+}
 
 func (s *Server) startFollowing(ctx context.Context) {
 	s.prepareFollowerState()
@@ -20,7 +26,7 @@ func (s *Server) prepareFollowerState() {
 	updateAttrs := map[string]interface{}{
 		"State": constants.Follower,
 	}
-	followerTicker = time.NewTicker(time.Duration(config.GetTickerIntervalInMillisecond()) * time.Millisecond)
+	followerTicker = time.NewTicker(util.GetRandomTickerDuration(minTickerIntervalInMs, maxTickerIntervalInMs))
 	s.update(updateAttrs)
 }
 
@@ -40,5 +46,5 @@ func (s *Server) startServerTicker(ctx context.Context) {
 }
 
 func (s *Server) resetFollowerTicker() {
-	followerTicker.Reset(util.GetRandomTickerDuration(config.GetTickerIntervalInMillisecond()))
+	followerTicker.Reset(util.GetRandomTickerDuration(minTickerIntervalInMs, maxTickerIntervalInMs))
 }

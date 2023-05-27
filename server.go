@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"sync"
 
 	"github.com/adityeah8969/raft/config"
@@ -56,7 +55,14 @@ var stateStartFunc map[constants.ServerState]func(context.Context)
 
 func init() {
 
+	// if true {
+	// 	serverInstance = &Server{}
+	// 	return
+	// }
+
 	sugar = logger.GetLogger()
+
+	go startRPCServer()
 
 	dbInst, err := serverdb.GetServerDbInstance()
 	if err != nil {
@@ -80,23 +86,30 @@ func init() {
 		sugar.Fatalf("Fetching the server peers: ", err)
 	}
 
-	rpcClients := make([]rpcClient.RpcClientI, len(peers))
-	nextIndex := make([]int, len(peers))
-	matchIndex := make([]int, len(peers))
+	// Change this to len(peers) later
+	rpcClients := make([]rpcClient.RpcClientI, len(peers)+1)
+	nextIndex := make([]int, len(peers)+1)
+	matchIndex := make([]int, len(peers)+1)
+
+	serverId := config.GetServerId()
 
 	for _, peer := range peers {
-		client, err := rpcClient.GetRpcClient("tcp", fmt.Sprintf("%s:%d", peer.Address, config.GetAppPort()))
+		if serverId == peer.Address {
+			continue
+		}
+		client, err := rpcClient.GetRpcClient("tcp", fmt.Sprintf("%s:%d", peer.Address, config.GetAppPort()), 10)
 		if err != nil {
-			sugar.Fatalw("initializing rpc client: ", "error", err)
+			panic(fmt.Sprintf("Rpc Client initialization failed for serverId: %v with error: %v", serverId, err))
 		}
 		index := util.GetServerIndex(peer.Hostname)
 		rpcClients[index] = client
 		nextIndex[index] = 1
 		matchIndex[index] = 0
 	}
+	sugar.Infof("All rpc clients for server: %v have been initialized successfully", serverId)
 
 	serverInstance = &Server{
-		serverId:          config.GetServerId(),
+		serverId:          serverId,
 		peers:             peers,
 		State:             constants.Follower,
 		serverDb:          dbInst,
@@ -120,6 +133,8 @@ func init() {
 		constants.Candidate: serverInstance.startContesting,
 		constants.Leader:    serverInstance.startLeading,
 	}
+	sugar.Info("registering serverInstance ...")
+	rpc.Register(serverInstance)
 }
 
 func GetServerPeers() ([]peer.Peer, error) {
@@ -135,100 +150,105 @@ func GetServerPeers() ([]peer.Peer, error) {
 	return peers, nil
 }
 
-func StartServing() error {
-	rpc.Register(serverInstance)
-	rpc.HandleHTTP()
+func startRPCServer() {
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", config.GetAppPort()))
 	if err != nil {
-		return err
+		sugar.DPanicf("Unable to create RPC listener: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	sugar.Info("waiting to accept rpc connections ...")
+	rpc.Accept(l)
+}
 
+func StartServing() {
+	ctx, cancel := context.WithCancel(context.Background())
 	serverCtx.ctxMu.Lock()
 	serverCtx.ctx = ctx
 	serverCtx.cancel = cancel
 	serverCtx.ctxMu.Unlock()
 	go serverInstance.startFollowing(ctx)
-
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
-	go serverInstance.applyEntries(ctx)
-	err = http.Serve(l, nil)
-	return err
+	serverInstance.applyEntries(ctx)
 }
 
-func (s *Server) RequestVoteRPC(req *types.RequestVoteRPC, res *types.ResponseVoteRPC) {
+func (s *Server) RequestVoteRPC(ctx context.Context, req *types.RequestVoteRPC, res *types.ResponseVoteRPC) error {
+
+	_ = ctx
 
 	serverMu.RLock()
-
 	leaderId := s.LeaderId
 	currTerm := s.CurrentTerm
 	votedFor := s.VotedFor
 	logs := s.Logs
-
 	serverMu.RUnlock()
 
 	// 	Notify that the requesting candidate should step back.
 	if currTerm > req.Term {
+		sugar.Infow("Denying vote because of outdated term", "voter: ", s.serverId, "voter term: ", currTerm, "candidate: ", req.CandidateId, "current leader: ", leaderId)
 		res = &types.ResponseVoteRPC{
 			VoteGranted:   false,
 			OutdatedTerm:  true,
 			CurrentLeader: leaderId,
 			Term:          currTerm,
 		}
-		return
+		return nil
 	}
 
 	if currTerm == req.Term && votedFor != "" {
-		// Deny vote
 		if votedFor != req.CandidateId {
+			sugar.Infow("Denying vote because already voted", "voter: ", s.serverId, "voter term: ", currTerm, "candidate: ", req.CandidateId, "voted for", votedFor)
 			res = &types.ResponseVoteRPC{
 				VoteGranted: false,
 			}
-			return
+			return nil
 		}
 		// For idempotency
 		if votedFor == req.CandidateId {
+			sugar.Infow("Already voted the candidate", "voter: ", s.serverId, "voter term: ", currTerm, "candidate: ", req.CandidateId, "voted for", votedFor)
 			res = &types.ResponseVoteRPC{
 				VoteGranted: true,
 			}
-			return
+			return nil
 		}
 	}
 
-	// Deny if the candidates logs are not updated enough
+	// Deny if the
 	if len(logs) > 0 {
 		lastServerLog := logs[len(logs)-1]
 		if lastServerLog.Term > req.LastLogTerm || (lastServerLog.Term == req.LastLogTerm && lastServerLog.Index > req.LastLogIndex) {
+			sugar.Infow("Denying vote because candidate logs are not updated enough", "voter: ", s.serverId, "voter term: ", currTerm, "candidate: ", req.CandidateId)
 			res = &types.ResponseVoteRPC{
 				VoteGranted: false,
 			}
-			return
+			return nil
 		}
-	}
 
-	// Vote for the requesting candidate
-	err := s.serverDb.SaveVote(&types.Vote{Term: req.Term, VotedFor: req.CandidateId})
-	if err != nil {
+		// Vote for the requesting candidate
+		err := s.serverDb.SaveVote(&types.Vote{Term: req.Term, VotedFor: req.CandidateId})
+		if err != nil {
+			sugar.Infow("Voting for the candidate", "voter: ", s.serverId, "voter term: ", currTerm, "candidate: ", req.CandidateId)
+			res = &types.ResponseVoteRPC{
+				VoteGranted: false,
+				Err:         errors.New("db error while persisting vote"),
+			}
+			return err
+		}
+
+		updatedAttrs := map[string]interface{}{
+			"CurrentTerm": req.Term,
+			"VotedFor":    req.CandidateId,
+		}
+		s.update(updatedAttrs)
+
 		res = &types.ResponseVoteRPC{
-			VoteGranted: false,
-			Err:         errors.New("db error while persisting vote"),
+			VoteGranted: true,
 		}
-		return
+		sugar.Infow("Voted for the candidate", "voter: ", s.serverId, "voter term: ", currTerm, "candidate: ", req.CandidateId)
 	}
-
-	updatedAttrs := map[string]interface{}{
-		"CurrentTerm": req.Term,
-		"VotedFor":    req.CandidateId,
-	}
-	s.update(updatedAttrs)
-
-	res = &types.ResponseVoteRPC{
-		VoteGranted: true,
-	}
+	return nil
 }
 
-func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.ResponseAppendEntryRPC) {
+func (s *Server) AppendEntryRPC(ctx context.Context, req *types.RequestAppendEntryRPC, res *types.ResponseAppendEntryRPC) error {
 
 	serverMu.RLock()
 	currTerm := s.CurrentTerm
@@ -245,7 +265,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 			OutdatedTerm:  true,
 			CurrentLeader: leaderId,
 		}
-		return
+		return nil
 	}
 
 	// revert to follower in case the current term is less than the one in the request
@@ -255,13 +275,13 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 			Success:  false,
 		}
 		s.revertToFollower(req.Term, req.LeaderId)
-		return
+		return nil
 	}
 
 	// heartbeat
 	if len(req.Entries) == 0 {
 		s.resetFollowerTicker()
-		return
+		return nil
 	}
 
 	removeDupicateEntriesFromRequest(req.Entries, logs, req)
@@ -275,7 +295,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 			Term:                         currTerm,
 			LastCommittedIndexInFollower: lastComittedIndex,
 		}
-		return
+		return nil
 	}
 
 	// return failure
@@ -288,7 +308,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 			CurrentLeader:       leaderId,
 			PreviousEntryAbsent: true,
 		}
-		return
+		return nil
 	}
 
 	// Append Entries
@@ -307,6 +327,7 @@ func (s *Server) AppendEntryRPC(req *types.RequestAppendEntryRPC, res *types.Res
 		Term:                         currTerm,
 		LastCommittedIndexInFollower: updatedLastCommitIndex,
 	}
+	return nil
 }
 
 func (s *Server) update(updatedAttrs map[string]interface{}) error {

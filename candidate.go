@@ -50,22 +50,23 @@ func (s *Server) requestVoteFromPeers(ctx context.Context, responseChan chan *ty
 		if s.serverId == util.GetServerId(ind) {
 			continue
 		}
-		go func(client rpcClient.RpcClientI) {
+		clientParam := client
+		go func(clientIn rpcClient.RpcClientI) {
 			defer wg.Done()
 			request := &types.RequestVoteRPC{
 				Term:        currTerm,
 				CandidateId: s.serverId,
 			}
 			response := &types.ResponseVoteRPC{}
-			err := client.MakeRPC(ctx, "Server.RequestVoteRPC", request, response, config.GetRpcRetryLimit(), config.GetRPCTimeoutInSeconds())
+			err := clientIn.MakeRPC(ctx, "Server.RequestVoteRPC", request, response, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
 			if err != nil {
-				sugar.Warnw("request vote RPC failed after retries", "candidate", s.serverId, "rpcClient", client, "request", request, "response", response)
+				sugar.Warnw("request vote RPC failed after retries", "candidate", s.serverId, "rpcClient", clientIn, "request", request, "response", response)
 				response = &types.ResponseVoteRPC{
 					VoteGranted: false,
 				}
 			}
 			responseChan <- response
-		}(client)
+		}(clientParam)
 	}
 	wg.Wait()
 }
@@ -93,6 +94,7 @@ func (s *Server) startContesting(ctx context.Context) {
 			go s.requestVoteFromPeers(ctx, responseChan)
 
 			for resp := range responseChan {
+				sugar.Debugw("response received while requesting for vote", "resp", resp)
 				if resp.VoteGranted {
 					voteCnt++
 					if voteCnt >= int(math.Ceil(1.0*float64(len(s.peers)/2))) {

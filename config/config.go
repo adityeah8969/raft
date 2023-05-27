@@ -8,26 +8,29 @@ import (
 )
 
 const (
-	configFilePath = "/home/aditya/workspace/repos/raft/config"
+	configFilePath = "./config"
 	configFileName = "config"
 	configFileType = "yaml"
 )
 
 // check if the members can be made private
 type Config struct {
-	StateMachineType              string      `mapstructure:"StateMachineType"`
-	StateMachineConfig            interface{} `mapstructure:"StateMachineConfig"`
-	ServerDbType                  string      `mapstructure:"ServerDbType"`
-	ServerDBConfig                interface{} `mapstructure:"ServerDbConfig"`
-	ServerId                      string      `mapstructure:"ServerId"`
-	Peers                         interface{} `mapstructure:"Peers"`
-	TickerIntervalInMiliseconds   int         `mapstructure:"TickerIntervalInMiliseconds"`
-	RpcRetryLimit                 int         `mapstructure:"RpcRetryLimit"`
-	RPCTimeoutInSeconds           int         `mapstructure:"RPCTimeoutInSeconds"`
-	ClientRequestTimeoutInSeconds int         `mapstructure:"ClientRequestTimeoutInSeconds"`
-	MinElectionTimeOutInSeconds   int         `mapstructure:"ElectionTimerDurationInSeconds"`
-	MaxElectionTimeOutInSeconds   int         `mapstructure:"MaxElectionTimeOutInSeconds"`
-	Port                          int         `mapstructure:"MaxElectionTimeOutInSeconds"`
+	StateMachineType   string      `mapstructure:"StateMachineType"`
+	StateMachineConfig interface{} `mapstructure:"StateMachineConfig"`
+	ServerDbType       string      `mapstructure:"ServerDbType"`
+	ServerDBConfig     interface{} `mapstructure:"ServerDbConfig"`
+	ServerId           string      `mapstructure:"ServerId"`
+	Peers              interface{} `mapstructure:"Peers"`
+	// TickerIntervalInMiliseconds           int         `mapstructure:"TickerIntervalInMiliseconds"`
+	HeartBeatTickerIntervalInMilliseconds int `mapstructure:"HeartBeatTickerIntervalInMilliseconds"`
+	MinTickerIntervalInMiliseconds        int `mapstructure:"MinTickerIntervalInMiliseconds"`
+	MaxTickerIntervalInMiliseconds        int `mapstructure:"MaxTickerIntervalInMiliseconds"`
+	RpcRetryLimit                         int `mapstructure:"RpcRetryLimit"`
+	RpcTimeoutInSeconds                   int `mapstructure:"RpcTimeoutInSeconds"`
+	ClientRequestTimeoutInSeconds         int `mapstructure:"ClientRequestTimeoutInSeconds"`
+	MinElectionTimeOutInSeconds           int `mapstructure:"ElectionTimerDurationInSeconds"`
+	MaxElectionTimeOutInSeconds           int `mapstructure:"MaxElectionTimeOutInSeconds"`
+	Port                                  int `mapstructure:"Port"`
 }
 
 var config Config
@@ -84,16 +87,28 @@ func GetServerDbType() string {
 	return config.ServerDbType
 }
 
-func GetTickerIntervalInMillisecond() int {
-	return config.TickerIntervalInMiliseconds
+// func GetTickerIntervalInMillisecond() int {
+// 	return config.TickerIntervalInMiliseconds
+// }
+
+func GetHeartBeatTickerIntervalInMilliseconds() int {
+	return config.HeartBeatTickerIntervalInMilliseconds
+}
+
+func GetMinTickerIntervalInMillisecond() int {
+	return config.MinTickerIntervalInMiliseconds
+}
+
+func GetMaxTickerIntervalInMillisecond() int {
+	return config.MaxTickerIntervalInMiliseconds
 }
 
 func GetRpcRetryLimit() int {
 	return config.RpcRetryLimit
 }
 
-func GetRPCTimeoutInSeconds() int {
-	return config.RPCTimeoutInSeconds
+func GetRpcTimeoutInSeconds() int {
+	return config.RpcTimeoutInSeconds
 }
 
 func GetClientRequestTimeoutInSeconds() int {

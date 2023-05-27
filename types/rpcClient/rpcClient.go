@@ -43,10 +43,32 @@ func (r *rpcClient) MakeRPC(ctx context.Context, method string, req any, res any
 	}
 }
 
-func GetRpcClient(protocol string, address string) (RpcClientI, error) {
-	client, err := rpc.Dial(protocol, address)
-	if err != nil {
-		return nil, err
+func GetRpcClient(protocol string, address string, retryLimit int) (RpcClientI, error) {
+
+	var client *rpc.Client
+	var err error
+
+	for cnt := 1; cnt <= retryLimit; cnt++ {
+		client, err = rpc.Dial(protocol, address)
+		if err != nil {
+
+			time.Sleep(10 * time.Second)
+			sugar.Infof("sleeping 10 more seconds, waiting for peers to come up\n")
+			continue
+			// _, ok := err.(*net.DNSError)
+			// sugar.Infof("err dialing 1: %#v \n", opErr.Err)
+			// sugar.Infof("err dialing 2: %v", opErr.Err.Error())
+			// if ok {
+			// 	sugar.Warnf("Connection refused, waiting for peer to come up")
+			// 	time.Sleep(100 * time.Millisecond)
+			// 	continue
+			// } else {
+			// 	return nil, err
+			// }
+
+		}
+		// sugar.Infof("Retrying initialization of rpc client, current error: %v", err)
+		// panic(fmt.Sprintf("unable to create rpc client: %v", err))
 	}
-	return &rpcClient{client: client}, nil
+	return &rpcClient{client: client}, err
 }

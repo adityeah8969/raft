@@ -1,7 +1,3 @@
-ServerId: server-0
-
-Port: 8089
-
 StateMachineType: sqlite
 StateMachineConfig:
   SrcFileName: "/tmp/raft-data/statemc.db"
@@ -10,24 +6,45 @@ ServerDbType: sqlite
 ServerDbConfig:
   SrcFileName: "/tmp/raft-data/server.db"
 
+ServerId: server-0
+Port: 8089
+
 Peers:
   - HostName: server-0
     Address: server-0
   - HostName: server-1
     Address: server-1
-  - HostName: server-2
-    Address: server-2
-  - HostName: server-3
-    Address: server-3
-  - HostName: server-4
-    Address: server-4
+  # - HostName: server-2
+  #   Address: server-2
+  # - HostName: server-3
+  #   Address: server-3
+  # - HostName: server-4
+  #   Address: server-4
 
-TickerIntervalInMiliseconds: 150
 
-RpcRetryLimit: 10000
-RPCTimeoutInSeconds: 86400
+# Peers:
+  # - HostName: server-0
+  #   Address: server-0
+  # - HostName: server-1
+  #   Address: 127.0.0.1:8081
+  # - HostName: server-2
+  #   Address: server-2
+  # - HostName: server-3
+  #   Address: server-3
+  # - HostName: server-4
+  #   Address: server-4
+
+HeartBeatTickerIntervalInMilliseconds: 100 
+
+MinTickerIntervalInMiliseconds: 100
+MaxTickerIntervalInMiliseconds: 2000
+
+RpcRetryLimit: 10
+RpcTimeoutInSeconds: 86400
 
 ClientRequestTimeoutInSeconds: 30
+
 ElectionTimerDurationInSeconds: 60
+
 MinElectionTimeOutInSeconds: 50
 MaxElectionTimeOutInSeconds: 100

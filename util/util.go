@@ -14,8 +14,8 @@ func GetRandomInt(max int, min int) int {
 	return rand.Intn(max-min) + min
 }
 
-func GetRandomTickerDuration(interval int) time.Duration {
-	return time.Duration(GetRandomInt(interval, 2*interval) * int(time.Millisecond))
+func GetRandomTickerDuration(minRange, maxRange int) time.Duration {
+	return time.Duration((rand.Intn(maxRange-minRange) + minRange) * int(time.Millisecond))
 }
 
 func GetReversedSlice(slice []logEntry.LogEntry) []logEntry.LogEntry {
