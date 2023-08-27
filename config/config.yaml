@@ -14,37 +14,20 @@ Peers:
     Address: server-0
   - HostName: server-1
     Address: server-1
-  # - HostName: server-2
-  #   Address: server-2
-  # - HostName: server-3
-  #   Address: server-3
-  # - HostName: server-4
-  #   Address: server-4
-
-
-# Peers:
-  # - HostName: server-0
-  #   Address: server-0
-  # - HostName: server-1
-  #   Address: 127.0.0.1:8081
-  # - HostName: server-2
-  #   Address: server-2
-  # - HostName: server-3
-  #   Address: server-3
-  # - HostName: server-4
-  #   Address: server-4
-
-HeartBeatTickerIntervalInMilliseconds: 100 
-
-MinTickerIntervalInMiliseconds: 100
-MaxTickerIntervalInMiliseconds: 2000
+  - HostName: server-2
+    Address: server-2
+  - HostName: server-3
+    Address: server-3
+  - HostName: server-4
+    Address: server-4
 
 RpcRetryLimit: 10
 RpcTimeoutInSeconds: 86400
 
-ClientRequestTimeoutInSeconds: 30
+HeartBeatTickerIntervalInMilliseconds: 300 
 
-ElectionTimerDurationInSeconds: 60
+MinFollowerTickerIntervalInMiliseconds: 600
+MaxFollowerTickerIntervalInMiliseconds: 2000
 
-MinElectionTimeOutInSeconds: 50
 MaxElectionTimeOutInSeconds: 100
+ClientRequestTimeoutInSeconds: 30

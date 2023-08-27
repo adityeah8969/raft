@@ -1,5 +1,5 @@
 # Build the application from source
-FROM golang:1.19 AS build-stage
+FROM golang:latest AS build-stage
 WORKDIR /app
 COPY . ./
 RUN go mod download

@@ -2,10 +2,11 @@ package raft
 
 import (
 	"context"
+	"fmt"
 	"math"
+	"time"
 
 	"sync"
-	"time"
 
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types"
@@ -13,105 +14,132 @@ import (
 	"github.com/adityeah8969/raft/util"
 )
 
-func (s *Server) voteForItself() error {
+const (
+	ElectionInProgresState = "in progress"
+	ElectionCompletedState = "completed"
 
-	serverMu.RLock()
-	serverId := s.serverId
-	currTerm := s.CurrentTerm
-	serverMu.RUnlock()
+	ElectionResultWon  = "won"
+	ElectionResultLost = "lost"
+)
+
+func (s *Server) prepareCandidateState() (map[string]interface{}, error) {
+	updateAttrs := make(map[string]interface{}, 0)
+	return updateAttrs, nil
+}
+
+func (s *Server) voteForItself() error {
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
 
 	vote := &types.Vote{
-		VotedFor: serverId,
-		Term:     currTerm + 1,
+		VotedFor: s.serverId,
+		Term:     s.CurrentTerm + 1,
 	}
 	err := s.serverDb.SaveVote(vote)
 	if err != nil {
 		return err
 	}
-	updatedAttrs := map[string]interface{}{
-		"CurrentTerm": currTerm + 1,
-		"VotedFor":    serverId,
+
+	updateAttrs := map[string]interface{}{
+		"CurrentTerm": s.CurrentTerm + 1,
+		"VotedFor":    s.serverId,
 	}
-	s.update(updatedAttrs)
+	s.update(updateAttrs, nil, false)
+	s.logger.Debugf("%v voted for itself", s.serverId)
 	return nil
 }
 
-func (s *Server) requestVoteFromPeers(ctx context.Context, responseChan chan *types.ResponseVoteRPC) {
-	defer close(responseChan)
+func (s *Server) requestVoteFromPeers(ctx context.Context, ch chan *types.ResponseVoteRPC, wg *sync.WaitGroup) {
 
-	serverMu.RLock()
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	s.serverMu.RLock()
 	currTerm := s.CurrentTerm
-	serverMu.RUnlock()
-
-	var wg sync.WaitGroup
-	wg.Add(len(s.peers))
+	s.serverMu.RUnlock()
 
 	for ind, client := range s.rpcClients {
-		if s.serverId == util.GetServerId(ind) {
+		peerID := util.GetServerId(ind)
+		if s.serverId == peerID {
 			continue
 		}
-		clientParam := client
-		go func(clientIn rpcClient.RpcClientI) {
+		wg.Add(1)
+		go func(client rpcClient.RpcClientI, peerID string) {
 			defer wg.Done()
+			childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds()*int(time.Second)))
+			defer cancel()
 			request := &types.RequestVoteRPC{
 				Term:        currTerm,
 				CandidateId: s.serverId,
 			}
-			response := &types.ResponseVoteRPC{}
-			err := clientIn.MakeRPC(ctx, "Server.RequestVoteRPC", request, response, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
+			var response types.ResponseVoteRPC
+			s.logger.Debugw("requesting vote", "candidateID", s.serverId, "voterID", peerID)
+			err := client.MakeRPC(childCtx, "Server.RequestVoteRPC", request, &response, config.GetRpcRetryLimit())
 			if err != nil {
-				sugar.Warnw("request vote RPC failed after retries", "candidate", s.serverId, "rpcClient", clientIn, "request", request, "response", response)
-				response = &types.ResponseVoteRPC{
-					VoteGranted: false,
-				}
+				s.logger.Errorw("request vote RPC failed after retries", "err", err, "candidateID", s.serverId, "voterID", peerID, "request", request, "response", response)
+				response.VoteGranted = false
 			}
-			responseChan <- response
-		}(clientParam)
+			// Is there a chance of pushing to a closed channel here ?
+			ch <- &response
+		}(client, peerID)
 	}
-	wg.Wait()
 }
 
 func (s *Server) startContesting(ctx context.Context) {
 
-	electionTimer := time.NewTimer(time.Duration(util.GetRandomInt(config.GetMaxElectionTimeOutInSec(), config.GetMinElectionTimeOutInSec())) * time.Second)
-
 	for {
 		select {
 		case <-ctx.Done():
-			sugar.Infof("server %s stopped contesting election", s.serverId)
+			s.logger.Infof("server %s stopped contesting election", s.serverId)
 			return
-		case <-electionTimer.C:
+		default:
 
-			voteCnt := 0
+			startTime := time.Now()
+
+			s.logger.Infow("contesting election", "candidate", s.serverId, "term", s.CurrentTerm+1)
+			ctx, cancel := context.WithTimeout(ctx, time.Duration(config.GetMaxElectionTimeOutInSec()*int(time.Second)))
+			defer cancel()
+
 			err := s.voteForItself()
 			if err != nil {
-				sugar.Debugw("server %s voting for itsefl", "candidate id", s.serverId, "err", err)
+				s.logger.Debugw("contesting election", "candidateID", s.serverId, "error voting for itself", err)
 				continue
 			}
-			voteCnt++
+			voteCnt := 1
 
-			responseChan := make(chan *types.ResponseVoteRPC, len(s.peers)-1)
-			go s.requestVoteFromPeers(ctx, responseChan)
+			ch := make(chan *types.ResponseVoteRPC, len(s.peers))
+			wg := sync.WaitGroup{}
+			go s.requestVoteFromPeers(ctx, ch, &wg)
+			s.processVoteResponse(ch, &voteCnt)
 
-			for resp := range responseChan {
-				sugar.Debugw("response received while requesting for vote", "resp", resp)
-				if resp.VoteGranted {
-					voteCnt++
-					if voteCnt >= int(math.Ceil(1.0*float64(len(s.peers)/2))) {
-						electionTimer.Stop()
-						s.revertToLeader()
-						return
-					}
-					continue
-				}
-				if resp.OutdatedTerm {
-					electionTimer.Stop()
-					s.revertToFollower(resp.Term, resp.CurrentLeader)
-					return
-				}
+			elapsedDuration := time.Since(startTime)
+			s.logger.Debugw("current election contest over", "time elapsed", elapsedDuration, "candidateID", s.serverId)
+
+			timeRemainingForNextElection := time.Duration(config.GetMaxElectionTimeOutInSec())*time.Second - elapsedDuration
+			if timeRemainingForNextElection > 0 {
+				s.logger.Debugf("time remaining for next election %v", timeRemainingForNextElection)
+				time.Sleep(timeRemainingForNextElection)
 			}
-
-			electionTimer.Reset(time.Duration(util.GetRandomInt(config.GetMaxElectionTimeOutInSec(), config.GetMinElectionTimeOutInSec())) * time.Second)
 		}
+	}
+}
+
+func (s *Server) processVoteResponse(ch chan *types.ResponseVoteRPC, voteCnt *int) {
+	minVoteCount := int(math.Ceil(1.0 * float64((len(s.peers) + 1)) / 2))
+	for resp := range ch {
+		if resp.VoteGranted {
+			*voteCnt++
+			if *voteCnt >= minVoteCount {
+				s.logger.Debugw("processed vote responses", "election status", ElectionCompletedState, "result", ElectionResultWon, "vote count", fmt.Sprintf("%v / %v", *voteCnt, len(s.peers)+1))
+				s.revertToLeader()
+			}
+		}
+		if resp.OutdatedTerm {
+			s.logger.Debugw("processed vote responses", "election status", ElectionCompletedState, "result", ElectionResultLost, "encountered outdated term", resp)
+			s.revertToFollower(resp.Term, resp.CurrentLeader)
+		}
+		s.logger.Debugw("processing vote responses", "election status", ElectionInProgresState, "vote count", fmt.Sprintf("%v / %v", *voteCnt, len(s.peers)+1))
 	}
 }

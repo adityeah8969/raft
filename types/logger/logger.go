@@ -8,19 +8,14 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-var sugar *zap.SugaredLogger
-
-func init() {
+func GetLogger() *zap.SugaredLogger {
 	loggerConfig := zap.NewProductionConfig()
+	loggerConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
 	loggerConfig.EncoderConfig.TimeKey = "timestamp"
-	loggerConfig.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.RFC3339)
+	loggerConfig.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.StampMilli)
 	logger, err := loggerConfig.Build()
 	if err != nil {
 		log.Fatal(err)
 	}
-	sugar = logger.Sugar()
-}
-
-func GetLogger() *zap.SugaredLogger {
-	return sugar
+	return logger.Sugar()
 }

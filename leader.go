@@ -9,7 +9,6 @@ import (
 
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types"
-	"github.com/adityeah8969/raft/types/constants"
 	"github.com/adityeah8969/raft/types/logEntry"
 	"github.com/adityeah8969/raft/types/rpcClient"
 	"github.com/adityeah8969/raft/util"
@@ -19,14 +18,13 @@ const (
 	leaderRpcMethods = 2
 )
 
-var heartBeatRPCTicker *time.Ticker
-
-func (s *Server) prepareLeaderState() {
-	serverMu.RLock()
+func (s *Server) prepareLeaderState() (map[string]interface{}, error) {
+	s.serverMu.RLock()
 	logs := s.Logs
-	serverMu.RUnlock()
-	updatedNextIndexSlice := make([]int, len(s.peers))
-	updatedMatchIndexSlice := make([]int, len(s.peers))
+	s.serverMu.RUnlock()
+	// make peer length a constant outside
+	updatedNextIndexSlice := make([]int, len(s.peers)+1)
+	updatedMatchIndexSlice := make([]int, len(s.peers)+1)
 	for i := range s.peers {
 		updatedNextIndexSlice[i] = len(logs)
 		updatedMatchIndexSlice[i] = 0
@@ -34,78 +32,100 @@ func (s *Server) prepareLeaderState() {
 	updatedAttrs := map[string]interface{}{
 		"NextIndex":  updatedNextIndexSlice,
 		"MatchIndex": updatedMatchIndexSlice,
-		"State":      constants.Leader,
 	}
-	heartBeatRPCTicker = time.NewTicker(time.Duration(config.GetHeartBeatTickerIntervalInMilliseconds()) * time.Millisecond)
-	s.update(updatedAttrs)
+	return updatedAttrs, nil
+}
+
+func (s *Server) resetLeaderTicker() {
+	s.logger.Debugw("resetting leader ticker for heartbeats", "server", s.serverId)
+	s.serverMu.Lock()
+	nextTickDuration := time.Duration(config.GetHeartBeatTickerIntervalInMilliseconds()) * time.Millisecond
+	s.logger.Debugf("ticker to tick in next %v", nextTickDuration)
+	s.leaderTicker.Reset(nextTickDuration)
+	s.serverMu.Unlock()
 }
 
 func (s *Server) startLeading(ctx context.Context) {
-	sugar.Infof("%s started leading", s.serverId)
-	s.prepareLeaderState()
+	s.logger.Infof("%s started leading", s.serverId)
 	leaderWg := sync.WaitGroup{}
 	leaderWg.Add(leaderRpcMethods)
 	go s.sendPeriodicHeartBeats(ctx, &leaderWg)
+	s.resetLeaderTicker()
 	go s.makeAppendEntryCalls(ctx, &leaderWg)
 	leaderWg.Wait()
 }
 
 func (s *Server) sendPeriodicHeartBeats(ctx context.Context, leaderWg *sync.WaitGroup) {
-	defer heartBeatRPCTicker.Stop()
+
+	s.logger.Debugw("preparing to send heartbeat", "server", s.serverId)
+
+	defer s.leaderTicker.Stop()
 	defer leaderWg.Done()
 
 	for {
 		select {
 		case <-ctx.Done():
-			sugar.Infof("%s done sending periodic heartbeat", s.serverId)
+			s.logger.Infof("%s done sending periodic heartbeat", s.serverId)
 			return
-		case <-heartBeatRPCTicker.C:
+		case <-s.leaderTicker.C:
 
-			serverMu.RLock()
+			s.serverMu.RLock()
 			request := &types.RequestAppendEntryRPC{
 				Term:                  s.CurrentTerm,
 				LeaderId:              s.serverId,
 				LeaderLastCommitIndex: s.LastComittedIndex,
 			}
-			serverMu.RUnlock()
+			s.serverMu.RUnlock()
 
 			responseChan := make(chan *types.ResponseAppendEntryRPC, len(s.peers)-1)
 			s.sendHeartBeatsToPeers(ctx, request, responseChan)
-
-			for resp := range responseChan {
-				if !resp.Success && resp.OutdatedTerm {
-					s.revertToFollower(resp.Term, resp.CurrentLeader)
-					return
-				}
-			}
-
-			heartBeatRPCTicker.Reset(time.Duration(config.GetHeartBeatTickerIntervalInMilliseconds()) * time.Millisecond)
+			s.resetLeaderTicker()
 		}
 	}
 }
 
 func (s *Server) sendHeartBeatsToPeers(ctx context.Context, req *types.RequestAppendEntryRPC, responseChan chan *types.ResponseAppendEntryRPC) {
-	defer close(responseChan)
+	startTime := time.Now()
 
+	s.logger.Debugw("sending heartbeats to peers", "leader", s.serverId)
 	wg := sync.WaitGroup{}
-	wg.Add(len(s.rpcClients))
 
 	for ind, client := range s.rpcClients {
-		if s.serverId == util.GetServerId(ind) {
+		peerID := util.GetServerId(ind)
+		if s.serverId == peerID {
 			continue
 		}
-		go func(client rpcClient.RpcClientI) {
+		wg.Add(1)
+		go func(client rpcClient.RpcClientI, peerID string) {
 			defer wg.Done()
+			childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds()*int(time.Second)))
+			defer cancel()
 			resp := &types.ResponseAppendEntryRPC{}
-			err := client.MakeRPC(ctx, "Server.AppendEntryRPC", req, resp, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
+			s.logger.Debugw("sending heartbeat", "sender", s.serverId, "receiver", peerID)
+			err := client.MakeRPC(childCtx, "Server.AppendEntryRPC", req, resp, config.GetRpcRetryLimit())
 			if err != nil {
-				sugar.Warnw("RPC resulted in error after retries", "rpcClient", client, "leaderId", req.LeaderId)
+				s.logger.Errorw("rpc error", "rpcClient", client, "leaderId", req.LeaderId)
 				return
 			}
 			responseChan <- resp
-		}(client)
+		}(client, peerID)
 	}
-	wg.Wait()
+	go func() {
+		s.logger.Debugw("waiting on go routines to finish")
+		wg.Wait()
+		close(responseChan)
+	}()
+	for resp := range responseChan {
+		s.logger.Debugf("heartbeat response: %v", resp)
+		if !resp.Success && resp.OutdatedTerm {
+			s.logger.Debugw("outdated term response received, reverting to follower", "existing leader", s.serverId, "new leader", resp.CurrentLeader, "new term", resp.Term)
+			s.revertToFollower(resp.Term, resp.CurrentLeader)
+			return
+		}
+	}
+	s.logger.Debug("gone through all the heart beat responses")
+	heartBeatsDispatchTime := time.Since(startTime)
+	s.logger.Debugf("total heartBeatsDispatchTime: %v", heartBeatsDispatchTime)
 }
 
 func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGroup) {
@@ -114,15 +134,15 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 	for {
 		select {
 		case <-ctx.Done():
-			sugar.Infof("%s stopped making append entry calls", s.serverId)
+			s.logger.Infof("%s stopped making append entry calls", s.serverId)
 			return
 		default:
 
-			serverMu.Lock()
+			s.serverMu.RLock()
 			nextIndex := s.NextIndex
 			matchIndex := s.MatchIndex
 			logs := s.Logs
-			serverMu.RUnlock()
+			s.serverMu.RUnlock()
 
 			responseChan := make(chan *types.ResponseAppendEntryRPC, len(s.rpcClients))
 			s.makeAppendEntryCallToPeers(ctx, responseChan)
@@ -138,13 +158,13 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 			}
 			err := s.updateCommitIndex()
 			if err != nil {
-				sugar.Debugf("Updating commit index in %s: %v", s.serverId, err)
+				s.logger.Debugf("Updating commit index in %s: %v", s.serverId, err)
 			}
 			updatedAttrs := map[string]interface{}{
 				"NextIndex":  nextIndex,
 				"MatchIndex": matchIndex,
 			}
-			s.update(updatedAttrs)
+			s.update(updatedAttrs, nil, true)
 		}
 	}
 }
@@ -152,12 +172,14 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 func (s *Server) makeAppendEntryCallToPeers(ctx context.Context, responseChan chan *types.ResponseAppendEntryRPC) {
 	defer close(responseChan)
 
-	serverMu.RLock()
+	s.logger.Debugw("making append entry calls to peers", "server", s.serverId)
+
+	s.serverMu.RLock()
 	nextIndex := s.NextIndex
 	logs := s.Logs
 	currTerm := s.CurrentTerm
 	lastComittedIndex := s.LastComittedIndex
-	serverMu.RUnlock()
+	s.serverMu.RUnlock()
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(s.rpcClients))
@@ -165,6 +187,10 @@ func (s *Server) makeAppendEntryCallToPeers(ctx context.Context, responseChan ch
 	for clientIndex := range s.rpcClients {
 
 		if s.serverId == util.GetServerId(clientIndex) {
+			continue
+		}
+
+		if nextIndex[clientIndex] > len(logs)-1 {
 			continue
 		}
 
@@ -202,15 +228,19 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 	response := &types.ResponseAppendEntryRPC{}
 	for {
 		client := s.rpcClients[clientIndex]
-		err := client.MakeRPC(ctx, "Server.AppendEntryRPC", request, response, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
+
+		childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds()*int(time.Second)))
+		defer cancel()
+
+		err := client.MakeRPC(childCtx, "Server.AppendEntryRPC", request, response, config.GetRpcRetryLimit())
 		if err != nil {
-			sugar.Warnw("append entry RPC calls failed", "Error", err, "leaderId", s.serverId, "rpcClient", client)
+			s.logger.Warnw("append entry RPC calls failed", "Error", err, "leaderId", s.serverId, "rpcClient", client)
 			response = &types.ResponseAppendEntryRPC{}
 			responseChan <- response
 			return
 		}
 		if response.PreviousEntryAbsent {
-			sugar.Infow("missing prvious entry", "leader", request.LeaderId, "rpcClient", client)
+			s.logger.Infow("missing prvious entry", "leader", request.LeaderId, "rpcClient", client)
 			prevEntry := getPreviousEntry(logs, request.PrevEntryIndex)
 			request.PrevEntryIndex = prevEntry.Index
 			request.PrevEntryTerm = prevEntry.Term
@@ -225,11 +255,13 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 
 func (s *Server) Set(ctx context.Context, req *types.RequestEntry, resp *types.ResponseEntry) error {
 
-	serverMu.RLock()
+	_ = ctx
+
+	s.serverMu.RLock()
 	leaderId := s.LeaderId
 	logs := s.Logs
 	lastAppliedIndex := s.LastAppliedIndex
-	serverMu.RUnlock()
+	s.serverMu.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.GetClientRequestTimeoutInSeconds())*time.Second)
 	defer cancel()
@@ -246,7 +278,7 @@ func (s *Server) Set(ctx context.Context, req *types.RequestEntry, resp *types.R
 
 	err := waitTillApply(ctx, lastAppliedIndex, logIndex)
 	if err != nil {
-		sugar.Debugw("wait till log gets applied to state machine", "error", err, "leaderId", leaderId, "log entry", req)
+		s.logger.Debugw("wait till log gets applied to state machine", "error", err, "leaderId", leaderId, "log entry", req)
 		resp = &types.ResponseEntry{
 			Success: false,
 			Err:     err,
@@ -261,9 +293,11 @@ func (s *Server) Set(ctx context.Context, req *types.RequestEntry, resp *types.R
 
 func (s *Server) Get(ctx context.Context, req *types.RequestEntry, resp *types.ResponseEntry) error {
 
-	serverMu.RLock()
+	_ = ctx
+
+	s.serverMu.RLock()
 	leaderId := s.LeaderId
-	serverMu.RUnlock()
+	s.serverMu.RUnlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -295,17 +329,21 @@ func (s *Server) Get(ctx context.Context, req *types.RequestEntry, resp *types.R
 
 func (s *Server) redirectRequestToLeader(ctx context.Context, method string, req *types.RequestEntry, resp *types.ResponseEntry) error {
 
-	serverMu.RLock()
+	s.serverMu.RLock()
 	leaderId := s.LeaderId
-	serverMu.RUnlock()
+	s.serverMu.RUnlock()
 
 	// re-direct to leader
 	if leaderId != s.serverId {
 		client := s.rpcClients[util.GetServerIndex(leaderId)]
+
+		childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds()*int(time.Second)))
+		defer cancel()
+
 		response := &types.ResponseEntry{}
-		err := client.MakeRPC(ctx, method, req, response, config.GetRpcRetryLimit(), config.GetRpcTimeoutInSeconds())
+		err := client.MakeRPC(childCtx, method, req, response, config.GetRpcRetryLimit())
 		if err != nil {
-			sugar.Warnw("set entry failed after retries", "serverId", s.serverId, "leaderId", s.LeaderId, "rpcClient", client, "request", req, "response", response)
+			s.logger.Warnw("set entry failed after retries", "serverId", s.serverId, "leaderId", s.LeaderId, "rpcClient", client, "request", req, "response", response)
 			response = &types.ResponseEntry{
 				Success: false,
 				Err:     err,
@@ -318,8 +356,8 @@ func (s *Server) redirectRequestToLeader(ctx context.Context, method string, req
 }
 
 func (s *Server) appendReqToLogs(req *types.RequestEntry) {
-	serverMu.Lock()
-	defer serverMu.Unlock()
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
 	log := logEntry.LogEntry{
 		Term:  s.CurrentTerm,
 		Index: len(s.Logs),
@@ -328,9 +366,11 @@ func (s *Server) appendReqToLogs(req *types.RequestEntry) {
 	s.Logs = append(s.Logs, log)
 }
 
-func (s *Server) appendRPCEntriesToLogs(logs []logEntry.LogEntry) {
-	serverMu.Lock()
-	defer serverMu.Unlock()
+func (s *Server) appendRPCEntriesToLogs(logs []logEntry.LogEntry, withLock bool) {
+	if withLock {
+		s.serverMu.Lock()
+		defer s.serverMu.Unlock()
+	}
 	s.Logs = append(s.Logs, logs...)
 }
 

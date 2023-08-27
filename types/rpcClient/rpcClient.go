@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/adityeah8969/raft/types/logger"
+	"github.com/adityeah8969/raft/util"
 	"github.com/keegancsmith/rpc"
 	"go.uber.org/zap"
 )
@@ -19,10 +20,8 @@ func init() {
 	sugar = logger.GetLogger()
 }
 
-func (r *rpcClient) MakeRPC(ctx context.Context, method string, req any, res any, retryCnt int, timeoutInSec int) error {
-
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutInSec))
-	defer cancel()
+// Is select over ctx.done and default needed here ?
+func (r *rpcClient) MakeRPC(ctx context.Context, method string, req interface{}, res interface{}, retryCnt int) error {
 
 	for {
 		select {
@@ -33,10 +32,11 @@ func (r *rpcClient) MakeRPC(ctx context.Context, method string, req any, res any
 			var err error
 			for i := 0; i < retryCnt; i++ {
 				err = r.client.Call(ctx, method, req, res)
-				if err != nil {
-					sugar.Debugw("RPC errored out retrying", "error", err, "rpcClient", r, "method", method)
+				if err != nil && util.ShouldRetry(err) {
+					sugar.Debugw("rpc errored out retrying", "error", err, "rpcClient", r, "method", method)
 					continue
 				}
+				break
 			}
 			return err
 		}
@@ -51,7 +51,6 @@ func GetRpcClient(protocol string, address string, retryLimit int) (RpcClientI, 
 	for cnt := 1; cnt <= retryLimit; cnt++ {
 		client, err = rpc.Dial(protocol, address)
 		if err != nil {
-
 			time.Sleep(10 * time.Second)
 			sugar.Infof("sleeping 10 more seconds, waiting for peers to come up\n")
 			continue
@@ -65,7 +64,6 @@ func GetRpcClient(protocol string, address string, retryLimit int) (RpcClientI, 
 			// } else {
 			// 	return nil, err
 			// }
-
 		}
 		// sugar.Infof("Retrying initialization of rpc client, current error: %v", err)
 		// panic(fmt.Sprintf("unable to create rpc client: %v", err))

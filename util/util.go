@@ -15,7 +15,8 @@ func GetRandomInt(max int, min int) int {
 }
 
 func GetRandomTickerDuration(minRange, maxRange int) time.Duration {
-	return time.Duration((rand.Intn(maxRange-minRange) + minRange) * int(time.Millisecond))
+	rand.Seed(time.Now().UnixNano())
+	return time.Duration((rand.Intn(maxRange-minRange) + minRange)) * time.Millisecond
 }
 
 func GetReversedSlice(slice []logEntry.LogEntry) []logEntry.LogEntry {
@@ -34,4 +35,23 @@ func GetServerIndex(serverId string) int {
 	// TODO: "server-" has to be taken from a variable
 	index, _ := strconv.Atoi(strings.TrimPrefix(serverId, "server-"))
 	return index
+}
+
+func MergeMaps(maps ...map[string]interface{}) map[string]interface{} {
+	res := make(map[string]interface{})
+	for _, mp := range maps {
+		for k, v := range mp {
+			res[k] = v
+		}
+	}
+	return res
+}
+
+func ShouldRetry(err error) bool {
+	switch err.Error() {
+	case "context canceled":
+		return false
+	default:
+		return true
+	}
 }

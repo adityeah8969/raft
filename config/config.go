@@ -15,28 +15,25 @@ const (
 
 // check if the members can be made private
 type Config struct {
-	StateMachineType   string      `mapstructure:"StateMachineType"`
-	StateMachineConfig interface{} `mapstructure:"StateMachineConfig"`
-	ServerDbType       string      `mapstructure:"ServerDbType"`
-	ServerDBConfig     interface{} `mapstructure:"ServerDbConfig"`
-	ServerId           string      `mapstructure:"ServerId"`
-	Peers              interface{} `mapstructure:"Peers"`
-	// TickerIntervalInMiliseconds           int         `mapstructure:"TickerIntervalInMiliseconds"`
-	HeartBeatTickerIntervalInMilliseconds int `mapstructure:"HeartBeatTickerIntervalInMilliseconds"`
-	MinTickerIntervalInMiliseconds        int `mapstructure:"MinTickerIntervalInMiliseconds"`
-	MaxTickerIntervalInMiliseconds        int `mapstructure:"MaxTickerIntervalInMiliseconds"`
-	RpcRetryLimit                         int `mapstructure:"RpcRetryLimit"`
-	RpcTimeoutInSeconds                   int `mapstructure:"RpcTimeoutInSeconds"`
-	ClientRequestTimeoutInSeconds         int `mapstructure:"ClientRequestTimeoutInSeconds"`
-	MinElectionTimeOutInSeconds           int `mapstructure:"ElectionTimerDurationInSeconds"`
-	MaxElectionTimeOutInSeconds           int `mapstructure:"MaxElectionTimeOutInSeconds"`
-	Port                                  int `mapstructure:"Port"`
+	StateMachineType                      string      `mapstructure:"StateMachineType"`
+	StateMachineConfig                    interface{} `mapstructure:"StateMachineConfig"`
+	ServerDbType                          string      `mapstructure:"ServerDbType"`
+	ServerDBConfig                        interface{} `mapstructure:"ServerDbConfig"`
+	ServerId                              string      `mapstructure:"ServerId"`
+	Peers                                 interface{} `mapstructure:"Peers"`
+	HeartBeatTickerIntervalInMilliseconds int         `mapstructure:"HeartBeatTickerIntervalInMilliseconds"`
+	MinTickerIntervalInMiliseconds        int         `mapstructure:"MinFollowerTickerIntervalInMiliseconds"`
+	MaxTickerIntervalInMiliseconds        int         `mapstructure:"MaxFollowerTickerIntervalInMiliseconds"`
+	RpcRetryLimit                         int         `mapstructure:"RpcRetryLimit"`
+	RpcTimeoutInSeconds                   int         `mapstructure:"RpcTimeoutInSeconds"`
+	ClientRequestTimeoutInSeconds         int         `mapstructure:"ClientRequestTimeoutInSeconds"`
+	MaxElectionTimeOutInSeconds           int         `mapstructure:"MaxElectionTimeOutInSeconds"`
+	Port                                  int         `mapstructure:"Port"`
 }
 
 var config Config
 
 func init() {
-	fmt.Println("Reading config")
 	viper.AddConfigPath(configFilePath)
 	viper.SetConfigName(configFileName)
 	viper.SetConfigType(configFileType)
@@ -87,10 +84,6 @@ func GetServerDbType() string {
 	return config.ServerDbType
 }
 
-// func GetTickerIntervalInMillisecond() int {
-// 	return config.TickerIntervalInMiliseconds
-// }
-
 func GetHeartBeatTickerIntervalInMilliseconds() int {
 	return config.HeartBeatTickerIntervalInMilliseconds
 }
@@ -113,10 +106,6 @@ func GetRpcTimeoutInSeconds() int {
 
 func GetClientRequestTimeoutInSeconds() int {
 	return config.ClientRequestTimeoutInSeconds
-}
-
-func GetMinElectionTimeOutInSec() int {
-	return config.MinElectionTimeOutInSeconds
 }
 
 func GetMaxElectionTimeOutInSec() int {

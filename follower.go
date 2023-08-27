@@ -2,49 +2,47 @@ package raft
 
 import (
 	"context"
-	"time"
 
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types/constants"
 	"github.com/adityeah8969/raft/util"
 )
 
-var followerTicker *time.Ticker
-var minTickerIntervalInMs, maxTickerIntervalInMs int
-
-func init() {
-	minTickerIntervalInMs = config.GetMinTickerIntervalInMillisecond()
-	maxTickerIntervalInMs = config.GetMaxTickerIntervalInMillisecond()
-}
-
-func (s *Server) startFollowing(ctx context.Context) {
-	s.prepareFollowerState()
-	s.startServerTicker(ctx)
-}
-
-func (s *Server) prepareFollowerState() {
+func (s *Server) prepareFollowerState() (map[string]interface{}, error) {
 	updateAttrs := map[string]interface{}{
 		"State": constants.Follower,
 	}
-	followerTicker = time.NewTicker(util.GetRandomTickerDuration(minTickerIntervalInMs, maxTickerIntervalInMs))
-	s.update(updateAttrs)
+	return updateAttrs, nil
+}
+
+func (s *Server) startFollowing(ctx context.Context) {
+	s.logger.Debugf("%v started following", s.serverId)
+	s.resetFollowerTicker(true)
+	s.startServerTicker(ctx)
 }
 
 func (s *Server) startServerTicker(ctx context.Context) {
-	defer followerTicker.Stop()
+	defer s.followerTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			sugar.Infof("stopping ticker for server %s", s.serverId)
+			s.logger.Debugw("ctx done on follower ticker", "server", s.serverId)
 			return
-		case t := <-followerTicker.C:
-			sugar.Infof("election contest started by %s at %v", s.serverId, t)
-			s.updateState(constants.Candidate, nil)
+		case <-s.followerTicker.C:
+			s.revertToCandidate()
 			return
 		}
 	}
 }
 
-func (s *Server) resetFollowerTicker() {
-	followerTicker.Reset(util.GetRandomTickerDuration(minTickerIntervalInMs, maxTickerIntervalInMs))
+func (s *Server) resetFollowerTicker(withLock bool) {
+	if withLock {
+		s.serverMu.Lock()
+		defer s.serverMu.Unlock()
+	}
+	
+	nextTickDuration := 1000 * util.GetRandomTickerDuration(config.GetMinTickerIntervalInMillisecond(), config.GetMaxTickerIntervalInMillisecond())
+	s.followerTicker.Reset(nextTickDuration)
+	s.logger.Debugf("nextTickDuration: %#v", nextTickDuration)
+	s.logger.Debugw("follower ticker reset", "followerID", s.serverId, "nextTickDuration", nextTickDuration)
 }

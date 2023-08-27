@@ -13,6 +13,7 @@ type ResponseAppendEntryRPC struct {
 
 type ResponseVoteRPC struct {
 	Term          int
+	Voter         string
 	VoteGranted   bool
 	OutdatedTerm  bool
 	CurrentLeader string
