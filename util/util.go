@@ -10,13 +10,9 @@ import (
 	"github.com/adityeah8969/raft/types/logEntry"
 )
 
-func GetRandomInt(max int, min int) int {
-	return rand.Intn(max-min) + min
-}
-
-func GetRandomTickerDuration(minRange, maxRange int) time.Duration {
+func GetRandomInt(min int, max int) int {
 	rand.Seed(time.Now().UnixNano())
-	return time.Duration((rand.Intn(maxRange-minRange) + minRange)) * time.Millisecond
+	return rand.Intn(max-min) + min
 }
 
 func GetReversedSlice(slice []logEntry.LogEntry) []logEntry.LogEntry {

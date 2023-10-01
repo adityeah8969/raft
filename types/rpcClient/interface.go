@@ -1,7 +1,10 @@
 package rpcClient
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type RpcClientI interface {
-	MakeRPC(context.Context, string, any, any, int) error
+	MakeRPC(context.Context, string, any, any, int, *time.Duration) error
 }

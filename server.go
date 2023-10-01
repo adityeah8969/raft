@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -39,6 +40,7 @@ type Server struct {
 	currentCancelFunc context.CancelFunc
 	followerTicker    *time.Ticker
 	leaderTicker      *time.Ticker
+	candidateTicker   *time.Ticker
 	LeaderId          string
 	State             constants.ServerState
 	CurrentTerm       int
@@ -54,13 +56,6 @@ var serverInstance *Server
 
 func init() {
 	sugar := logger.GetLogger()
-
-	respChannel := make(chan interface{})
-	go startRPCServer(&respChannel)
-	go func() {
-		err := <-respChannel
-		sugar.Panic(err)
-	}()
 
 	dbInst, err := serverdb.GetServerDbInstance()
 	if err != nil {
@@ -93,8 +88,9 @@ func init() {
 		State:             constants.Follower,
 		serverDb:          dbInst,
 		stateMachine:      stateMcInst,
-		followerTicker:    time.NewTicker(1 * time.Millisecond),
-		leaderTicker:      time.NewTicker(1 * time.Millisecond),
+		followerTicker:    time.NewTicker(time.Duration(math.MaxInt64)),
+		leaderTicker:      time.NewTicker(time.Duration(math.MaxInt64)),
+		candidateTicker:   time.NewTicker(time.Duration(math.MaxInt64)),
 		serverMu:          &sync.RWMutex{},
 		Logs:              logs,
 		CurrentTerm:       0,
@@ -102,9 +98,6 @@ func init() {
 		LastComittedIndex: 0,
 		LastAppliedIndex:  0,
 	}
-
-	sugar.Debugf("registering rpc for %v", serverId)
-	rpc.Register(serverInstance)
 
 	stateStartFunc := map[constants.ServerState]func(context.Context){
 		constants.Follower:  serverInstance.startFollowing,
@@ -120,6 +113,13 @@ func init() {
 
 	serverInstance.stateStartFunc = stateStartFunc
 	serverInstance.statePrepareFunc = statePrepareFunc
+
+	respChannel := make(chan interface{})
+	go startRPCServer(&respChannel)
+	go func() {
+		err := <-respChannel
+		sugar.Panic(err)
+	}()
 
 	rpcClients := make([]rpcClient.RpcClientI, len(peers)+1)
 	nextIndex := make([]int, len(peers)+1)
@@ -144,6 +144,7 @@ func init() {
 	serverInstance.rpcClients = rpcClients
 
 	serverInstance.logger.Debugw("all rpc clients for server initialized successfully", "server", serverInstance.serverId)
+
 }
 
 func GetServerPeers() ([]peer.Peer, error) {
@@ -171,7 +172,11 @@ func StartServing() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverInstance.update(nil, cancel, true)
+	serverInstance.logger.Debugw("server will now get into initial follower state")
 	go serverInstance.startFollowing(ctx)
+
+	serverInstance.logger.Debugf("registering rpc for %v", serverInstance.serverId)
+	rpc.Register(serverInstance)
 
 	applyEntryCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -187,8 +192,9 @@ func (s *Server) RequestVoteRPC(ctx context.Context, req *types.RequestVoteRPC, 
 	defer s.serverMu.Unlock()
 
 	// notify that the requesting candidate should step back.
+
 	// Race Condition: There are cases where server becomes candidate with an incremented term right before receiving first heartbeat of the leader of previous term.
-	// The below check fails the heartbeat request of the concerned leader
+	// The below check fails the append entry request of the concerned leader
 	if s.CurrentTerm > req.Term {
 		s.logger.Infow("denying vote because of outdated term", "voter: ", s.serverId, "voter term: ", s.CurrentTerm, "candidate: ", req.CandidateId, "current leader: ", s.LeaderId)
 		*res = types.ResponseVoteRPC{
@@ -258,7 +264,12 @@ func (s *Server) RequestVoteRPC(ctx context.Context, req *types.RequestVoteRPC, 
 	}
 	s.logger.Infow("granting vote", "voter: ", s.serverId, "candidate: ", req.CandidateId, "term: ", req.Term)
 	if s.State == constants.Follower {
-		s.resetFollowerTicker(false)
+		s.logger.Debugw("voter already a follower, so resetting the follower ticker", "voter", s.serverId, "candidate", req.CandidateId, "term", req.Term)
+		duration := time.Duration(util.GetRandomInt(config.GetMinTickerIntervalInMillisecond(), config.GetMaxTickerIntervalInMillisecond())) * time.Millisecond
+		s.resetFollowerTicker(duration, false)
+	} else {
+		s.logger.Debugw("voter transitioning to a follower", "voter", s.serverId, "current state", s.State, "candidate", req.CandidateId, "term", req.Term)
+		s.revertToFollower(req.Term, "")
 	}
 	return nil
 }
@@ -296,10 +307,19 @@ func (s *Server) AppendEntryRPC(ctx context.Context, req *types.RequestAppendEnt
 	// heartbeat
 	if len(req.Entries) == 0 {
 		s.logger.Debugw("heartbeat received", "sender", req.LeaderId, "receiver", s.serverId)
-		if s.State == constants.Candidate {
-			go s.revertToFollower(req.Term, req.LeaderId)
+		// Do not change this as there are chances of a server having no leader, the logic below takes care of such scenarios
+		if s.LeaderId != req.LeaderId {
+			updateAttrs := map[string]interface{}{
+				"LeaderId": req.LeaderId,
+			}
+			s.update(updateAttrs, nil, false)
+		}
+		if s.State == constants.Follower {
+			s.logger.Debugw("already a follower, resetting the follower ticker", "heartbeat sender", req.LeaderId, "receiver", s.serverId)
+			duration := time.Duration(util.GetRandomInt(config.GetMinTickerIntervalInMillisecond(), config.GetMaxTickerIntervalInMillisecond())) * time.Millisecond
+			go s.resetFollowerTicker(duration, true)
 		} else {
-			go s.resetFollowerTicker(true)
+			go s.revertToFollower(req.Term, req.LeaderId)
 		}
 		*res = types.ResponseAppendEntryRPC{
 			ServerId: s.serverId,
@@ -308,42 +328,33 @@ func (s *Server) AppendEntryRPC(ctx context.Context, req *types.RequestAppendEnt
 		return nil
 	}
 
-	removeDupicateEntriesFromRequest(req.Entries, s.Logs, req)
-
-	// Achieving Idempotency
-	if len(req.Entries) == 0 {
-		*res = types.ResponseAppendEntryRPC{
-			ServerId:                     s.serverId,
-			Success:                      true,
-			CurrentLeader:                s.LeaderId,
-			Term:                         s.CurrentTerm,
-			LastCommittedIndexInFollower: s.LastComittedIndex,
-		}
-		s.logger.Debugw("no unique entry to append", "server", s.serverId)
-		return nil
-	}
-
 	// return failure
-	ok := s.trimInconsistentLogs(req.PrevEntryIndex, req.PrevEntryTerm, false)
-	if !ok {
+	trimResponse, err := s.trimInconsistentLogs(req, false)
+	if err != nil {
+		return err
+	}
+	if trimResponse.PreviousEntryPresent {
 		s.logger.Debugw("failed to trim inconsistent logs", "server", s.serverId)
 		*res = types.ResponseAppendEntryRPC{
-			ServerId:            s.serverId,
-			Success:             false,
-			OutdatedTerm:        false,
-			CurrentLeader:       s.LeaderId,
-			PreviousEntryAbsent: true,
+			ServerId:             s.serverId,
+			Success:              false,
+			OutdatedTerm:         false,
+			CurrentLeader:        s.LeaderId,
+			PreviousEntryPresent: true,
 		}
 		return nil
 	}
 
 	// Append Entries
+
+	// TODO: append entry call and last commit index update should happen atomically.
 	s.appendRPCEntriesToLogs(req.Entries, false)
 	updatedLastCommitIndex := req.LeaderLastCommitIndex
 	updatedAttrs := map[string]interface{}{
 		"LastComittedIndex": updatedLastCommitIndex,
 	}
 	s.update(updatedAttrs, nil, false)
+	s.logger.Debugw("updated last commit index", "server", s.serverId, "LastComittedIndex", updatedLastCommitIndex)
 
 	// return success
 	*res = types.ResponseAppendEntryRPC{
@@ -410,6 +421,7 @@ func (s *Server) applyEntriesToStateMachine() error {
 		return nil
 	}
 
+	// [TODO] Apply and server state update should happen atomically
 	err := s.stateMachine.Apply(batchEntries)
 	if err != nil {
 		return err
@@ -422,47 +434,8 @@ func (s *Server) applyEntriesToStateMachine() error {
 	return nil
 }
 
-func (s *Server) updateCommitIndex() error {
-
-	s.serverMu.RLock()
-	logs := s.Logs
-	lastCommitIndex := s.LastComittedIndex
-	currTerm := s.CurrentTerm
-	peers := s.peers
-	matchIndex := s.MatchIndex
-	s.serverMu.RUnlock()
-
-	var updatedCommitIndex int
-	for i := len(logs) - 1; i > lastCommitIndex; i-- {
-		cnt := 0
-		for _, matchIndex := range matchIndex {
-			if matchIndex >= i {
-				cnt++
-			}
-		}
-		if cnt > len(peers)/2 && logs[lastCommitIndex].Term == currTerm {
-			updatedCommitIndex = i
-			break
-		}
-	}
-
-	if updatedCommitIndex == 0 {
-		return nil
-	}
-
-	err := s.serverDb.SaveLogs(logs[lastCommitIndex+1 : updatedCommitIndex+1])
-	if err != nil {
-		return err
-	}
-
-	updatedAttrs := map[string]interface{}{
-		"LastComittedIndex": updatedCommitIndex,
-	}
-	s.update(updatedAttrs, nil, true)
-	return nil
-}
-
-func (s *Server) trimInconsistentLogs(prevEntryIndex int, prevEntryTerm int, withReadLock bool) bool {
+// take a call on whether 's.uodate' should return err or not, then decide the return type for the below method accordingly
+func (s *Server) trimInconsistentLogs(req *types.RequestAppendEntryRPC, withReadLock bool) (*types.ResponseTrimLogs, error) {
 
 	var logs []logEntry.LogEntry
 
@@ -476,26 +449,28 @@ func (s *Server) trimInconsistentLogs(prevEntryIndex int, prevEntryTerm int, wit
 
 	updatedAttrs := make(map[string]interface{}, 0)
 
-	if prevEntryIndex == -1 {
+	// Make sure previous entry index = -1 for the first round of append entry
+	if req.PrevEntryIndex == -1 {
 		updatedAttrs["Logs"] = logs[:0]
-		s.update(updatedAttrs, nil, true)
-		return true
+		s.update(updatedAttrs, nil, withReadLock)
+		return &types.ResponseTrimLogs{PreviousEntryPresent: true}, nil
 	}
 
 	for i := len(logs) - 1; i >= 0; i-- {
-		if i == prevEntryIndex && logs[i].Term == prevEntryTerm {
+		if i == req.PrevEntryIndex && logs[i].Term == req.PrevEntryTerm {
 			updatedAttrs["Logs"] = logs[:i+1]
-			s.update(updatedAttrs, nil, true)
-			return true
+			s.update(updatedAttrs, nil, withReadLock)
+			return &types.ResponseTrimLogs{PreviousEntryPresent: true}, nil
 		}
 	}
 
-	return false
+	return &types.ResponseTrimLogs{PreviousEntryPresent: false}, nil
 }
 
 func (s *Server) updateState(to constants.ServerState, updateAttrs map[string]interface{}) error {
 	statePrepareAttrs, err := s.statePrepareFunc[to]()
 	if err != nil {
+		s.logger.Debugw("state prepare method errored out", "err", err)
 		return err
 	}
 	updateAttrs = util.MergeMaps(statePrepareAttrs, updateAttrs)
@@ -506,7 +481,7 @@ func (s *Server) updateState(to constants.ServerState, updateAttrs map[string]in
 	return nil
 }
 
-// For all the revert methods should we return the errors
+// should we return errors for revert methods ?
 
 func (s *Server) revertToFollower(updatedTerm int, updatedLeader string) error {
 	s.logger.Debugw("reverting to follower", "server", s.serverId)
@@ -540,17 +515,4 @@ func (s *Server) cleanupCurrentstate() {
 		s.currentCancelFunc()
 	}
 	s.serverMu.RUnlock()
-}
-
-func removeDupicateEntriesFromRequest(entries []logEntry.LogEntry, logs []logEntry.LogEntry, req *types.RequestAppendEntryRPC) {
-	for _, entry := range entries {
-		if entry.Index > len(logs)-1 || logs[entry.Index] != entry {
-			break
-		}
-		if logs[entry.Index] == entry {
-			req.PrevEntryIndex++
-			req.PrevEntryTerm++
-		}
-	}
-	req.Entries = req.Entries[req.PrevEntryIndex+1:]
 }

@@ -6,10 +6,10 @@ RaftLogDir="/var/log/raft_logs"
 RaftLogFile="all_servers.log"
 
 echo "waiting for docker compose to run"
-timeout 100s docker compose up --build &> $RaftLogDir$"/"$RaftLogFile
+docker compose up --build &> $RaftLogDir$"/"$RaftLogFile
 
-docker compose down
-echo "stopped containers"
+# docker compose down
+# echo "stopped containers"
 
 server_prefix="raft-server-"
 # Don't mofify this. This seems to be added by docker compose 

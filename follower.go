@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"time"
 
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types/constants"
@@ -17,7 +18,8 @@ func (s *Server) prepareFollowerState() (map[string]interface{}, error) {
 
 func (s *Server) startFollowing(ctx context.Context) {
 	s.logger.Debugf("%v started following", s.serverId)
-	s.resetFollowerTicker(true)
+	duration := time.Duration(util.GetRandomInt(config.GetMinTickerIntervalInMillisecond(), config.GetMaxTickerIntervalInMillisecond())) * time.Millisecond
+	s.resetFollowerTicker(duration, true)
 	s.startServerTicker(ctx)
 }
 
@@ -35,14 +37,11 @@ func (s *Server) startServerTicker(ctx context.Context) {
 	}
 }
 
-func (s *Server) resetFollowerTicker(withLock bool) {
+func (s *Server) resetFollowerTicker(d time.Duration, withLock bool) {
 	if withLock {
 		s.serverMu.Lock()
 		defer s.serverMu.Unlock()
 	}
-	
-	nextTickDuration := 1000 * util.GetRandomTickerDuration(config.GetMinTickerIntervalInMillisecond(), config.GetMaxTickerIntervalInMillisecond())
-	s.followerTicker.Reset(nextTickDuration)
-	s.logger.Debugf("nextTickDuration: %#v", nextTickDuration)
-	s.logger.Debugw("follower ticker reset", "followerID", s.serverId, "nextTickDuration", nextTickDuration)
+	s.followerTicker.Reset(d)
+	s.logger.Debugf("follower ticker reset, next tick duration %#v ms", d.Milliseconds())
 }

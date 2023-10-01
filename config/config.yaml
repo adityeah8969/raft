@@ -10,8 +10,6 @@ ServerId: server-0
 Port: 8089
 
 Peers:
-  - HostName: server-0
-    Address: server-0
   - HostName: server-1
     Address: server-1
   - HostName: server-2
@@ -20,14 +18,20 @@ Peers:
     Address: server-3
   - HostName: server-4
     Address: server-4
+  - HostName: server-5
+    Address: server-5
 
-RpcRetryLimit: 10
+RpcRetryLimit: 1000
 RpcTimeoutInSeconds: 86400
+RpcRetryIntervalInMiliSeconds: 25
 
-HeartBeatTickerIntervalInMilliseconds: 300 
+HeartBeatTickerIntervalInMilliseconds: 100 
 
-MinFollowerTickerIntervalInMiliseconds: 600
-MaxFollowerTickerIntervalInMiliseconds: 2000
+MinFollowerTickerIntervalInMiliseconds: 500
+MaxFollowerTickerIntervalInMiliseconds: 10000
 
-MaxElectionTimeOutInSeconds: 100
+InitialElectionTickerIntervalInMiliseconds: 20
+ElectionTickerIntervalInMiliseconds: 1000
+
+MaxElectionTimeOutInSeconds: 5
 ClientRequestTimeoutInSeconds: 30

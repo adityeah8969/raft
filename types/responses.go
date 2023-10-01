@@ -6,7 +6,7 @@ type ResponseAppendEntryRPC struct {
 	Success                      bool
 	OutdatedTerm                 bool
 	CurrentLeader                string
-	PreviousEntryAbsent          bool
+	PreviousEntryPresent         bool
 	Term                         int
 	LastCommittedIndexInFollower int
 }
@@ -24,4 +24,15 @@ type ResponseEntry struct {
 	Success bool
 	Err     error
 	Data    interface{}
+}
+
+type ResonseProcessRPC struct {
+	HasWon         bool
+	IsOutdatedTerm bool
+	NextIndex      []int
+	MatchIndex     []int
+}
+
+type ResponseTrimLogs struct {
+	PreviousEntryPresent bool
 }
