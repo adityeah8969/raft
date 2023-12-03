@@ -89,7 +89,7 @@ func (s *Server) sendHeartBeatsToPeers(ctx context.Context, req *types.RequestAp
 		wg.Add(1)
 		go func(client rpcClient.RpcClientI, peerID string) {
 			defer wg.Done()
-			childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds()*int(time.Second)))
+			childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds())*time.Second)
 			defer cancel()
 			resp := &types.ResponseAppendEntryRPC{}
 			s.logger.Debugw("sending heartbeat", "sender", s.serverId, "receiver", peerID)
@@ -133,7 +133,7 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 			s.logger.Infof("%s stopped making append entry calls", s.serverId)
 			return
 		default:
-			s.logger.Debugw("making append entry calls to peers", "server", s.serverId)
+			s.logger.Debugw("periodic routine to make append entry calls to peers started", "server", s.serverId)
 
 			resp, err := s.makeAppendEntryCallToPeers(ctx)
 			if err != nil {
@@ -150,6 +150,7 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 				s.logger.Debugf("Updating commit index in %s: %v", s.serverId, err)
 			}
 
+			s.logger.Debugw("periodic routine to make append entry calls to peers stopped", "server", s.serverId)
 		}
 	}
 }
@@ -180,11 +181,13 @@ func (s *Server) makeAppendEntryCallToPeers(ctx context.Context) (*types.Resonse
 		}
 
 		if nextIndex[clientIndex] > len(logs)-1 {
+			s.logger.Debugw("no new entries to appen to followers case 1", "serverID", s.serverId, "clientIndex", clientIndex, "nextIndex[clientIndex]", nextIndex[clientIndex], "len(logs)-1", len(logs)-1)
 			continue
 		}
 
 		bulkEntries := logs[nextIndex[clientIndex]:]
 		if len(bulkEntries) == 0 {
+			s.logger.Debugw("no new entries to appen to followers case 2", "serverID", s.serverId)
 			continue
 		}
 
@@ -226,7 +229,7 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 	response := &types.ResponseAppendEntryRPC{}
 	for {
 		client := s.rpcClients[clientIndex]
-		childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds()*int(time.Second)))
+		childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds())*time.Second)
 		defer cancel()
 		err := client.MakeRPC(childCtx, "Server.AppendEntryRPC", request, response, config.GetRpcRetryLimit(), nil)
 		if err != nil {
@@ -256,47 +259,47 @@ func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs 
 	}
 }
 
-func (s *Server) Set(ctx context.Context, req *types.RequestEntry, resp *types.ResponseEntry) error {
+func (s *Server) Set(ctx context.Context, req *types.RequestAppendEntryRPC, resp *types.ResponseAppendEntryRPC) error {
 
 	s.logger.Debugw("server received request", "server", s.serverId, "req", req)
 	_ = ctx
 	s.serverMu.RLock()
 	leaderId := s.LeaderId
-	logs := s.Logs
-	lastAppliedIndex := s.LastAppliedIndex
 	s.serverMu.RUnlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.GetClientRequestTimeoutInSeconds())*time.Second)
-	defer cancel()
+	// ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.GetClientRequestTimeoutInSeconds())*time.Second)
+	// defer cancel()
 
 	if leaderId != s.serverId {
 		s.logger.Debugw("server redirecting request to leader", "server", s.serverId, "leader", s.LeaderId)
-		return s.redirectRequestToLeader(ctx, leaderId, "Server.Set", req, resp)
+		// Using context of  the client does not make sense in case of 'Set' RPC as it ties down the subsequent internal RPCs to client. So using a new context here.
+		return s.redirectRequestToLeader(context.Background(), leaderId, "Server.Set", req, resp)
 	}
 
-	lastLogIndex := len(logs) - 1
-	s.appendReqToLogs(req)
+	appendedLogs := s.appendRPCEntriesToLogs(req, true)
 
 	// We need a way to synchronously send the response back to the client after the entry is applied to the state machine.
-	// Just check if the entry has been applied, let it be a blocking call (As per the raft paper).
-
+	// Just check if the entry has been applied, let it be a blocking call (As per raft paper).
 	s.logger.Debugw("server waiting for log to be applied by state machine", "server", s.serverId)
-	err := waitTillApply(ctx, lastAppliedIndex, lastLogIndex)
+	err := s.waitTillApply(ctx, appendedLogs)
 	if err != nil {
 		s.logger.Debugw("wait till log gets applied to state machine", "error", err, "leaderId", leaderId, "log entry", req)
-		resp = &types.ResponseEntry{
+		resp = &types.ResponseAppendEntryRPC{
 			Success: false,
-			Err:     err,
 		}
 		return err
 	}
-	resp = &types.ResponseEntry{
-		Success: true,
-	}
+	s.logger.Debugw("successfully set entries", "server", s.serverId)
+	// resp = &types.ResponseAppendEntryRPC{
+	// 	Success: true,
+	// }
+	resp.Success = true
+
 	return nil
 }
 
-func (s *Server) Get(ctx context.Context, req *types.RequestEntry, resp *types.ResponseEntry) error {
+// Fix this method -> params + return type
+func (s *Server) Get(ctx context.Context, req *types.RequestAppendEntryRPC, resp *types.ResponseAppendEntryRPC) error {
 
 	_ = ctx
 
@@ -315,78 +318,119 @@ func (s *Server) Get(ctx context.Context, req *types.RequestEntry, resp *types.R
 	log := &logEntry.LogEntry{Entry: req}
 	logEntry, err := s.stateMachine.GetEntry(log)
 
+	_ = logEntry
+
 	if err != nil {
-		resp = &types.ResponseEntry{
+		resp = &types.ResponseAppendEntryRPC{
 			Success: false,
-			Err:     err,
 		}
 		return err
 	}
 
-	resp = &types.ResponseEntry{
+	resp = &types.ResponseAppendEntryRPC{
 		Success: false,
-		Err:     nil,
-		Data:    logEntry,
 	}
 
 	return nil
 }
 
-func (s *Server) redirectRequestToLeader(ctx context.Context, leaderId string, method string, req *types.RequestEntry, resp *types.ResponseEntry) error {
+func (s *Server) redirectRequestToLeader(ctx context.Context, leaderId string, method string, req *types.RequestAppendEntryRPC, resp *types.ResponseAppendEntryRPC) error {
 
-	childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds()*int(time.Second)))
+	childCtx, cancel := context.WithTimeout(ctx, time.Duration(config.GetRpcTimeoutInSeconds())*time.Second)
 	defer cancel()
 
 	client := s.rpcClients[util.GetServerIndex(leaderId)]
-	response := &types.ResponseEntry{}
-	err := client.MakeRPC(childCtx, method, req, response, config.GetRpcRetryLimit(), nil)
+	err := client.MakeRPC(childCtx, method, req, resp, config.GetRpcRetryLimit(), nil)
 	if err != nil {
-		s.logger.Warnw("set entry failed after retries", "serverId", s.serverId, "leaderId", s.LeaderId, "rpcClient", client, "request", req, "response", response)
-		response = &types.ResponseEntry{
-			Success: false,
-			Err:     err,
-		}
+		s.logger.Warnw("RPC failed after retries", "err", err, "method", method, "serverID", s.serverId, "leaderID", s.LeaderId, "request", req)
+		resp.Success = false
 		return err
 	}
 	return nil
 }
 
-func (s *Server) appendReqToLogs(req *types.RequestEntry) {
-	s.serverMu.Lock()
-	defer s.serverMu.Unlock()
-	log := logEntry.LogEntry{
-		Term:  s.CurrentTerm,
-		Index: len(s.Logs),
-		Entry: req,
-	}
-	s.Logs = append(s.Logs, log)
-}
-
-func (s *Server) appendRPCEntriesToLogs(logs []logEntry.LogEntry, withLock bool) {
+func (s *Server) appendRPCEntriesToLogs(req *types.RequestAppendEntryRPC, withLock bool) []logEntry.LogEntry {
 	if withLock {
 		s.serverMu.Lock()
 		defer s.serverMu.Unlock()
 	}
-	s.Logs = append(s.Logs, logs...)
-	s.logger.Debugw("appended log entries", "server", s.serverId, "logs", s.Logs)
+	s.logger.Debugw("acquired lock successfully", "serverID", s.serverId)
+	appendedLogs := make([]logEntry.LogEntry, 0)
+	for _, entry := range req.Entries {
+		log := logEntry.LogEntry{
+			Term:  s.CurrentTerm,
+			Index: len(s.Logs),
+			Entry: entry.Entry,
+		}
+		s.Logs = append(s.Logs, log)
+		appendedLogs = append(appendedLogs, log)
+	}
+	s.LastComittedIndex = len(s.Logs) - 1
+	s.logger.Debugw("appended logs successfully", "serverID", s.serverId, "returning last appended log index", len(s.Logs)-1, "current logs", s.Logs)
+	return appendedLogs
 }
 
-func waitTillApply(ctx context.Context, lastAppliedIndex int, lastLogIndex int) error {
-	// [TODO] take this from config
-	tickerDuration := 10 * time.Millisecond
+func (s *Server) waitTillApply(ctx context.Context, appendedLogs []logEntry.LogEntry) error {
+	// TODO: take this from config
+	tickerDuration := 25 * time.Millisecond
 	waitTillApplyTicker := time.NewTicker(tickerDuration)
 	for {
 		select {
 		case <-ctx.Done():
 			return errors.New("context done called")
 		case <-waitTillApplyTicker.C:
-			if lastAppliedIndex < lastLogIndex {
+
+			s.serverMu.RLock()
+			logs := s.Logs
+			lastAppliedIndex := s.LastAppliedIndex
+			s.serverMu.RUnlock()
+
+			lastAppendedLogIndex := appendedLogs[len(appendedLogs)-1].Index
+			if lastAppendedLogIndex < lastAppliedIndex {
+				// continue waiting
+				s.logger.Debugw("waiting till log gets applied", "serverID", s.serverId)
 				waitTillApplyTicker.Reset(tickerDuration)
 				continue
+			}
+
+			for _, log := range appendedLogs {
+				index := log.Index
+				if index > len(logs)-1 || index < 0 {
+					return errors.New("appended logs with invalid index found")
+				}
+				same, err := s.areEntriesSame(&log, &logs[index])
+				if err != nil {
+					return err
+				}
+				if !same {
+					s.logger.Infow("entries do not match", "appendedEntry", log, "appliedEntry", logs[index])
+					return errors.New("appended log entry does not match with applied log entry")
+				}
 			}
 			return nil
 		}
 	}
+}
+
+func (s *Server) areEntriesSame(appendedLogEntry, appliedLogEntry *logEntry.LogEntry) (bool, error) {
+
+	s.logger.Debugf("appendedLogEntry: %#v\n", appendedLogEntry)
+	s.logger.Debugf("appliedLogEntry: %#v\n", appliedLogEntry)
+
+	appendedEntry, err := s.stateMachine.GetStateMcLogFromLogEntry(appendedLogEntry)
+	if err != nil {
+		s.logger.Debugw("unable to cast into appendedEntry", "err", err, "serverID", s.serverId, "appendedEntry", appendedEntry)
+		return false, errors.New("unable to cast into appendedEntry")
+	}
+	appliedEntry, err := s.stateMachine.GetStateMcLogFromLogEntry(appliedLogEntry)
+	if err != nil {
+		s.logger.Debugw("unable to cast into appliedEntry", "serverID", s.serverId, "appliedEntry", appliedEntry)
+		return false, errors.New("unable to cast into appliedEntry")
+	}
+	if appliedEntry != appendedEntry {
+		return false, nil
+	}
+	return true, nil
 }
 
 func getPreviousEntry(logs []logEntry.LogEntry, currEntryIndex int) *logEntry.LogEntry {
@@ -419,8 +463,8 @@ func (s *Server) updateLeaderIndexes(resp *types.ResonseProcessRPC, withLock boo
 	var updatedCommitIndex int
 	for i := len(logs) - 1; i > lastCommitIndex; i-- {
 		cnt := 0
-		for _, matchIndex := range matchIndex {
-			if matchIndex >= i {
+		for _, ind := range matchIndex {
+			if ind >= i {
 				cnt++
 			}
 		}
@@ -434,6 +478,7 @@ func (s *Server) updateLeaderIndexes(resp *types.ResonseProcessRPC, withLock boo
 		return nil
 	}
 
+	s.logger.Debugw("saving logs", "serverID", s.serverId, "logs", logs[lastCommitIndex+1:updatedCommitIndex+1])
 	err := s.serverDb.SaveLogs(logs[lastCommitIndex+1 : updatedCommitIndex+1])
 	if err != nil {
 		return err
@@ -447,6 +492,5 @@ func (s *Server) updateLeaderIndexes(resp *types.ResonseProcessRPC, withLock boo
 	s.update(updateAttrs, nil, withLock)
 
 	s.logger.Debugw("updated leader indexes", "updateAttrs", updateAttrs)
-
 	return nil
 }

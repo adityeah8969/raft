@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -95,8 +96,8 @@ func init() {
 		Logs:              logs,
 		CurrentTerm:       0,
 		VotedFor:          "",
-		LastComittedIndex: 0,
-		LastAppliedIndex:  0,
+		LastComittedIndex: -1,
+		LastAppliedIndex:  -1,
 	}
 
 	stateStartFunc := map[constants.ServerState]func(context.Context){
@@ -174,6 +175,10 @@ func StartServing() {
 	serverInstance.update(nil, cancel, true)
 	serverInstance.logger.Debugw("server will now get into initial follower state")
 	go serverInstance.startFollowing(ctx)
+
+	// TODO: Might have to remove gob.Register
+	serverInstance.logger.Debug("registering gob for testing")
+	gob.Register(map[string]interface{}{})
 
 	serverInstance.logger.Debugf("registering rpc for %v", serverInstance.serverId)
 	rpc.Register(serverInstance)
@@ -348,7 +353,7 @@ func (s *Server) AppendEntryRPC(ctx context.Context, req *types.RequestAppendEnt
 	// Append Entries
 
 	// TODO: append entry call and last commit index update should happen atomically.
-	s.appendRPCEntriesToLogs(req.Entries, false)
+	_ = s.appendRPCEntriesToLogs(req, false)
 	updatedLastCommitIndex := req.LeaderLastCommitIndex
 	updatedAttrs := map[string]interface{}{
 		"LastComittedIndex": updatedLastCommitIndex,
@@ -396,10 +401,12 @@ func (s *Server) applyEntries(ctx context.Context) {
 			s.logger.Debugf("server %s stopped applying entries on context cancellation", s.serverId)
 			return
 		default:
+			s.logger.Debugw("periodic routine to apply entries to state machine started", "serverID", s.serverId)
 			err := s.applyEntriesToStateMachine()
 			if err != nil {
 				s.logger.Debugf("applying entries to server %s : %v", s.serverId, err)
 			}
+			s.logger.Debugw("periodic routine to apply entries to state machine stopped", "serverID", s.serverId)
 		}
 	}
 }
@@ -412,15 +419,18 @@ func (s *Server) applyEntriesToStateMachine() error {
 	s.serverMu.RUnlock()
 
 	if lastComittedIndex <= lastAppliedIndex {
+		s.logger.Debugw("no new entry to apply case 1", "serverID", s.serverId)
 		return nil
 	}
 
 	batchEntries := s.Logs[lastAppliedIndex+1 : lastComittedIndex+1]
 
 	if len(batchEntries) == 0 {
+		s.logger.Debugw("no new entry to apply case 2", "serverID", s.serverId)
 		return nil
 	}
 
+	s.logger.Debugw("new entries to apply to statemachine spotted", "serverID", s.serverId)
 	// [TODO] Apply and server state update should happen atomically
 	err := s.stateMachine.Apply(batchEntries)
 	if err != nil {
@@ -431,6 +441,8 @@ func (s *Server) applyEntriesToStateMachine() error {
 		"LastAppliedIndex": lastComittedIndex,
 	}
 	s.update(updatedAttrs, nil, true)
+
+	s.logger.Debugw("entries applied", "serverID", s.serverId, "updated lastAppliedIndex", lastComittedIndex, "batchEntries", batchEntries)
 	return nil
 }
 

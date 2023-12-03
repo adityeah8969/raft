@@ -25,7 +25,7 @@ func (r *rpcClient) MakeRPC(ctx context.Context, method string, req interface{},
 	for i := 0; i < retryCnt; i++ {
 		err = r.client.Call(ctx, method, req, res)
 		if err != nil && util.ShouldRetry(err) {
-			sugar.Debugw("rpc retrying", "error", err, "rpcClient", r, "method", method)
+			sugar.Debugw("rpc retrying", "error", err, "method", method, "request", req)
 			if retryInterval != nil {
 				time.Sleep(*retryInterval)
 			}
@@ -44,7 +44,7 @@ func GetRpcClient(protocol string, address string, retryLimit int) (RpcClientI, 
 	for cnt := 1; cnt <= retryLimit; cnt++ {
 		client, err = rpc.Dial(protocol, address)
 		if err != nil {
-			// take this as an input param to the method. i don't think we should make this duration configurable  
+			// take this as an input param to the method. i don't think we should make this duration configurable
 			time.Sleep(2 * time.Second)
 			sugar.Infof("sleeping 2 more seconds, waiting for peers to come up\n")
 			continue

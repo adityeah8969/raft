@@ -2,6 +2,8 @@
 
 set -x
 
+rm -rf lo
+
 RaftLogDir="/var/log/raft_logs"
 RaftLogFile="all_servers.log"
 

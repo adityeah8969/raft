@@ -45,7 +45,10 @@ func MergeMaps(maps ...map[string]interface{}) map[string]interface{} {
 
 func ShouldRetry(err error) bool {
 	switch err.Error() {
+	// TODO: What can be done for these constants ?
 	case "context canceled":
+		return false
+	case "context deadline exceeded":
 		return false
 	default:
 		return true

@@ -9,9 +9,11 @@ import (
 
 func GetStateMachine() (StateMachine, error) {
 	stateMachinetype := config.GetStateMachineType()
+	fmt.Printf("stateMachinetype: %v\n", stateMachinetype)
 	switch stateMachinetype {
 	case string(constants.Sqlite):
-		var sqlStateMachine SqliteStateMachine
+		// TODO: Why are we initializing the var first and then calling associated method ?
+		var sqlStateMachine *SqliteStateMachine
 		return sqlStateMachine.GetStateMachineInstance(), nil
 	}
 	return nil, fmt.Errorf("incompatible state machine type %q", stateMachinetype)

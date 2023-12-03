@@ -5,15 +5,11 @@ import (
 )
 
 type ServerSqliteDbConfig struct {
-	SrcFileName string `mapstructure:"srcfilename"`
+	SrcFileName string `mapstructure:"SrcFileName"`
 }
 
+// TODO: Can we improve on this 'LoadConfig'
 func (s *ServerSqliteDbConfig) LoadConfig(bytes []byte) (ServerDBConfig, error) {
-	// var serverSqliteDbConfig ServerDBConfig
-	// if err := json.Unmarshal(bytes, &serverSqliteDbConfig); err != nil {
-	// 	return nil, err
-	// }
-
 	if err := json.Unmarshal(bytes, s); err != nil {
 		return nil, err
 	}
