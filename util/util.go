@@ -54,3 +54,10 @@ func ShouldRetry(err error) bool {
 		return true
 	}
 }
+
+func Min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

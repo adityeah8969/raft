@@ -2,7 +2,15 @@
 
 set -x
 
-rm -rf lo
+data_dir_prefix="local_data/server-"
+data_dir_suffix="/*"
+
+echo "deleting local data"
+n=5
+for ((i=0; i<n; i++))
+do
+    rm -rf $data_dir_prefix$i$data_dir_suffix
+done
 
 RaftLogDir="/var/log/raft_logs"
 RaftLogFile="all_servers.log"

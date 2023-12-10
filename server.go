@@ -48,8 +48,8 @@ type Server struct {
 	VotedFor          string
 	LastComittedIndex int
 	LastAppliedIndex  int
-	NextIndex         []int
-	MatchIndex        []int
+	NextIndex         []int // index of the next log entry be to sent
+	MatchIndex        []int // highest log entry index known to be appended
 	Logs              []logEntry.LogEntry
 }
 
@@ -333,41 +333,48 @@ func (s *Server) AppendEntryRPC(ctx context.Context, req *types.RequestAppendEnt
 		return nil
 	}
 
-	// return failure
 	trimResponse, err := s.trimInconsistentLogs(req, false)
 	if err != nil {
 		return err
 	}
-	if trimResponse.PreviousEntryPresent {
-		s.logger.Debugw("failed to trim inconsistent logs", "server", s.serverId)
+
+	if !trimResponse.PreviousEntryPresent {
 		*res = types.ResponseAppendEntryRPC{
 			ServerId:             s.serverId,
 			Success:              false,
-			OutdatedTerm:         false,
 			CurrentLeader:        s.LeaderId,
-			PreviousEntryPresent: true,
+			Term:                 s.CurrentTerm,
+			PreviousEntryPresent: false,
 		}
 		return nil
 	}
 
-	// Append Entries
-
 	// TODO: append entry call and last commit index update should happen atomically.
-	_ = s.appendRPCEntriesToLogs(req, false)
-	updatedLastCommitIndex := req.LeaderLastCommitIndex
+	appendedLogs := s.appendRPCEntriesToLogs(req, false)
+	lastAppendedLogIndex := appendedLogs[len(appendedLogs)-1].Index
+
+	logsToCommit := s.Logs[s.LastComittedIndex+1 : req.LeaderLastCommitIndex+1]
+	if len(logsToCommit) > 0 {
+		err = s.serverDb.SaveLogs(logsToCommit)
+		if err != nil {
+			return err
+		}
+	}
+
 	updatedAttrs := map[string]interface{}{
-		"LastComittedIndex": updatedLastCommitIndex,
+		"LastComittedIndex": req.LeaderLastCommitIndex,
 	}
 	s.update(updatedAttrs, nil, false)
-	s.logger.Debugw("updated last commit index", "server", s.serverId, "LastComittedIndex", updatedLastCommitIndex)
+	s.logger.Debugw("updated last commit index", "server", s.serverId, "LastComittedIndex", req.LeaderLastCommitIndex)
 
 	// return success
 	*res = types.ResponseAppendEntryRPC{
-		ServerId:                     s.serverId,
-		Success:                      true,
-		CurrentLeader:                s.LeaderId,
-		Term:                         s.CurrentTerm,
-		LastCommittedIndexInFollower: updatedLastCommitIndex,
+		ServerId:                    s.serverId,
+		Success:                     true,
+		CurrentLeader:               s.LeaderId,
+		Term:                        s.CurrentTerm,
+		LastAppendedIndexInFollower: lastAppendedLogIndex,
+		PreviousEntryPresent:        true,
 	}
 
 	s.logger.Debugw("successfully appended entry", "server", s.serverId, "entries", req.Entries)
@@ -401,12 +408,12 @@ func (s *Server) applyEntries(ctx context.Context) {
 			s.logger.Debugf("server %s stopped applying entries on context cancellation", s.serverId)
 			return
 		default:
-			s.logger.Debugw("periodic routine to apply entries to state machine started", "serverID", s.serverId)
+			// s.logger.Debugw("periodic routine to apply entries to state machine started", "serverID", s.serverId)
 			err := s.applyEntriesToStateMachine()
 			if err != nil {
 				s.logger.Debugf("applying entries to server %s : %v", s.serverId, err)
 			}
-			s.logger.Debugw("periodic routine to apply entries to state machine stopped", "serverID", s.serverId)
+			// s.logger.Debugw("periodic routine to apply entries to state machine stopped", "serverID", s.serverId)
 		}
 	}
 }
@@ -419,18 +426,13 @@ func (s *Server) applyEntriesToStateMachine() error {
 	s.serverMu.RUnlock()
 
 	if lastComittedIndex <= lastAppliedIndex {
-		s.logger.Debugw("no new entry to apply case 1", "serverID", s.serverId)
+		s.logger.Debugw("no new entries to apply", "serverID", s.serverId, "lastComittedIndex", lastComittedIndex, "lastAppliedIndex", lastAppliedIndex)
 		return nil
 	}
 
 	batchEntries := s.Logs[lastAppliedIndex+1 : lastComittedIndex+1]
 
-	if len(batchEntries) == 0 {
-		s.logger.Debugw("no new entry to apply case 2", "serverID", s.serverId)
-		return nil
-	}
-
-	s.logger.Debugw("new entries to apply to statemachine spotted", "serverID", s.serverId)
+	s.logger.Debugw("new entries to be applied spotted", "serverID", s.serverId, "lastAppliedIndex", lastAppliedIndex, "lastComittedIndex", lastComittedIndex, "batchEntries", batchEntries)
 	// [TODO] Apply and server state update should happen atomically
 	err := s.stateMachine.Apply(batchEntries)
 	if err != nil {
@@ -446,37 +448,46 @@ func (s *Server) applyEntriesToStateMachine() error {
 	return nil
 }
 
-// take a call on whether 's.uodate' should return err or not, then decide the return type for the below method accordingly
-func (s *Server) trimInconsistentLogs(req *types.RequestAppendEntryRPC, withReadLock bool) (*types.ResponseTrimLogs, error) {
+// TODO: should 's.update' return error
+func (s *Server) trimInconsistentLogs(req *types.RequestAppendEntryRPC, withLock bool) (*types.ResponseTrimLogs, error) {
 
 	var logs []logEntry.LogEntry
 
-	if withReadLock {
-		s.serverMu.RLock()
+	if withLock {
+		s.serverMu.Lock()
 		logs = s.Logs
-		s.serverMu.RUnlock()
+		s.serverMu.Unlock()
 	} else {
 		logs = s.Logs
 	}
 
-	updatedAttrs := make(map[string]interface{}, 0)
-
-	// Make sure previous entry index = -1 for the first round of append entry
-	if req.PrevEntryIndex == -1 {
-		updatedAttrs["Logs"] = logs[:0]
-		s.update(updatedAttrs, nil, withReadLock)
-		return &types.ResponseTrimLogs{PreviousEntryPresent: true}, nil
+	present := s.isPreviousEntryPresent(req, logs)
+	if !present {
+		return &types.ResponseTrimLogs{
+			PreviousEntryPresent: false,
+		}, nil
 	}
 
+	updatedAttrs := make(map[string]interface{}, 0)
+	updatedAttrs["Logs"] = logs[:req.PrevEntryIndex+1]
+	s.update(updatedAttrs, nil, withLock)
+
+	return &types.ResponseTrimLogs{
+		PreviousEntryPresent: true,
+	}, nil
+}
+
+func (s *Server) isPreviousEntryPresent(req *types.RequestAppendEntryRPC, logs []logEntry.LogEntry) bool {
+	// allowing this for first round of append entry
+	if req.PrevEntryIndex == -1 {
+		return true
+	}
 	for i := len(logs) - 1; i >= 0; i-- {
 		if i == req.PrevEntryIndex && logs[i].Term == req.PrevEntryTerm {
-			updatedAttrs["Logs"] = logs[:i+1]
-			s.update(updatedAttrs, nil, withReadLock)
-			return &types.ResponseTrimLogs{PreviousEntryPresent: true}, nil
+			return true
 		}
 	}
-
-	return &types.ResponseTrimLogs{PreviousEntryPresent: false}, nil
+	return false
 }
 
 func (s *Server) updateState(to constants.ServerState, updateAttrs map[string]interface{}) error {

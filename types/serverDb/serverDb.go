@@ -6,7 +6,6 @@ import (
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types"
 	"github.com/adityeah8969/raft/types/constants"
-	"github.com/adityeah8969/raft/types/logEntry"
 )
 
 func GetServerDbInstance() (DAO, error) {
@@ -30,7 +29,7 @@ func AutoMigrateModels(dbInst DAO) error {
 		return fmt.Errorf("nil dbConn")
 	}
 
-	err := dbConn.AutoMigrate(&types.Vote{}, &logEntry.LogEntry{})
+	err := dbConn.AutoMigrate(&types.Vote{}, &CommitLog{})
 	if err != nil {
 		return err
 	}

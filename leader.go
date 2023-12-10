@@ -3,7 +3,6 @@ package raft
 import (
 	"context"
 	"errors"
-	"math"
 	"sync"
 	"time"
 
@@ -25,6 +24,7 @@ func (s *Server) prepareLeaderState() (map[string]interface{}, error) {
 	// make peer length a constant outside
 	updatedNextIndexSlice := make([]int, len(s.peers)+1)
 	updatedMatchIndexSlice := make([]int, len(s.peers)+1)
+	// Is this re-initialization correct ?
 	for i := range s.peers {
 		updatedNextIndexSlice[i] = len(logs)
 		updatedMatchIndexSlice[i] = 0
@@ -123,7 +123,7 @@ func (s *Server) sendHeartBeatsToPeers(ctx context.Context, req *types.RequestAp
 	}
 }
 
-// should makeAppendEntryCalls be interval based ? Or how about using this exact flow form heartbeats ?
+// how about using this exact flow for heartbeats as well ? should makeAppendEntryCalls be interval based ?
 func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGroup) {
 	leaderWg.Done()
 
@@ -133,16 +133,21 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 			s.logger.Infof("%s stopped making append entry calls", s.serverId)
 			return
 		default:
-			s.logger.Debugw("periodic routine to make append entry calls to peers started", "server", s.serverId)
+			s.logger.Debugw("make append entry calls to peers started", "serverID", s.serverId)
 
 			resp, err := s.makeAppendEntryCallToPeers(ctx)
 			if err != nil {
-				s.logger.Errorw("making append entry calls to peers", "server", s.serverId, "error", err)
+				s.logger.Errorw("making append entry calls to peers", "serverID", s.serverId, "error", err)
 			}
 
 			if resp.IsOutdatedTerm {
-				s.logger.Debugw("outdated term received while making append entry calls to peers", "server", s.serverId)
-				return
+				s.logger.Debugw("outdated term received while making append entry calls to peers", "serverID", s.serverId)
+				continue
+			}
+
+			if resp.RPCsFired == 0 {
+				s.logger.Debugw("no RPCs fired as the followers are up to date", "serverID", s.serverId)
+				continue
 			}
 
 			err = s.updateLeaderIndexes(resp, true)
@@ -150,7 +155,7 @@ func (s *Server) makeAppendEntryCalls(ctx context.Context, leaderWg *sync.WaitGr
 				s.logger.Debugf("Updating commit index in %s: %v", s.serverId, err)
 			}
 
-			s.logger.Debugw("periodic routine to make append entry calls to peers stopped", "server", s.serverId)
+			s.logger.Debugw("make append entry calls to peers stopped", "server", s.serverId)
 		}
 	}
 }
@@ -167,12 +172,6 @@ func (s *Server) makeAppendEntryCallToPeers(ctx context.Context) (*types.Resonse
 	s.serverMu.RUnlock()
 
 	wg := sync.WaitGroup{}
-	wg.Add(len(s.rpcClients))
-
-	go func() {
-		wg.Wait()
-		close(responseChan)
-	}()
 
 	for clientIndex := range s.rpcClients {
 
@@ -180,51 +179,68 @@ func (s *Server) makeAppendEntryCallToPeers(ctx context.Context) (*types.Resonse
 			continue
 		}
 
-		if nextIndex[clientIndex] > len(logs)-1 {
-			s.logger.Debugw("no new entries to appen to followers case 1", "serverID", s.serverId, "clientIndex", clientIndex, "nextIndex[clientIndex]", nextIndex[clientIndex], "len(logs)-1", len(logs)-1)
+		if nextIndex[clientIndex] == len(logs) {
+			s.logger.Debugw("no new entries to append", "serverID", s.serverId, "clientIndex", clientIndex, "nextIndex[clientIndex]", nextIndex[clientIndex], "len(logs)-1", len(logs)-1)
 			continue
 		}
 
 		bulkEntries := logs[nextIndex[clientIndex]:]
-		if len(bulkEntries) == 0 {
-			s.logger.Debugw("no new entries to appen to followers case 2", "serverID", s.serverId)
-			continue
-		}
 
+		// Is previous entry working fine with bulk entries ?
 		prevEntry := getPreviousEntry(logs, nextIndex[clientIndex])
 
 		request := &types.RequestAppendEntryRPC{
 			Term:                  currTerm,
 			LeaderId:              s.serverId,
-			PrevEntryIndex:        prevEntry.Index,
-			PrevEntryTerm:         prevEntry.Term,
 			Entries:               bulkEntries,
 			LeaderLastCommitIndex: lastComittedIndex,
 		}
 
+		if prevEntry == nil {
+			request.PrevEntryIndex = -1
+			request.PrevEntryTerm = -1
+		} else {
+			request.PrevEntryIndex = prevEntry.Index
+			request.PrevEntryTerm = prevEntry.Term
+		}
+
+		wg.Add(1)
 		go s.makeAppendEntryCall(ctx, clientIndex, logs, request, responseChan, &wg)
 	}
 
+	go func() {
+		wg.Wait()
+		close(responseChan)
+	}()
+
+	processResp := &types.ResonseProcessRPC{}
 	for resp := range responseChan {
-		if !resp.Success && resp.OutdatedTerm {
-			go s.revertToFollower(resp.Term, resp.CurrentLeader)
-			return &types.ResonseProcessRPC{
-				IsOutdatedTerm: true,
-			}, nil
+		if !resp.Success {
+			if resp.OutdatedTerm {
+				go s.revertToFollower(resp.Term, resp.CurrentLeader)
+				return &types.ResonseProcessRPC{
+					IsOutdatedTerm: true,
+				}, nil
+			}
+			// To handle future inconsistencies
+			continue
 		}
+		processResp.RPCsFired++
 		// If successful: update nextIndex and matchIndex for the follower
 		serverIndex := util.GetServerIndex(resp.ServerId)
-		nextIndex[serverIndex] = int(math.Min(float64(resp.LastCommittedIndexInFollower+1), float64(len(logs)-1)))
-		matchIndex[serverIndex] = resp.LastCommittedIndexInFollower
+		matchIndex[serverIndex] = resp.LastAppendedIndexInFollower
+		// next index could potentially equal len(logs)
+		nextIndex[serverIndex] = util.Min(resp.LastAppendedIndexInFollower+1, len(logs))
 	}
 
-	return &types.ResonseProcessRPC{
-		NextIndex:  nextIndex,
-		MatchIndex: matchIndex,
-	}, nil
+	processResp.NextIndex = nextIndex
+	processResp.MatchIndex = matchIndex
+
+	return processResp, nil
 }
 
 func (s *Server) makeAppendEntryCall(ctx context.Context, clientIndex int, logs []logEntry.LogEntry, request *types.RequestAppendEntryRPC, responseChan chan *types.ResponseAppendEntryRPC, wg *sync.WaitGroup) {
+
 	defer wg.Done()
 	response := &types.ResponseAppendEntryRPC{}
 	for {
@@ -280,7 +296,7 @@ func (s *Server) Set(ctx context.Context, req *types.RequestAppendEntryRPC, resp
 
 	// We need a way to synchronously send the response back to the client after the entry is applied to the state machine.
 	// Just check if the entry has been applied, let it be a blocking call (As per raft paper).
-	s.logger.Debugw("server waiting for log to be applied by state machine", "server", s.serverId)
+	s.logger.Debugw("server waiting for logs to be applied by state machine", "server", s.serverId)
 	err := s.waitTillApply(ctx, appendedLogs)
 	if err != nil {
 		s.logger.Debugw("wait till log gets applied to state machine", "error", err, "leaderId", leaderId, "log entry", req)
@@ -290,11 +306,7 @@ func (s *Server) Set(ctx context.Context, req *types.RequestAppendEntryRPC, resp
 		return err
 	}
 	s.logger.Debugw("successfully set entries", "server", s.serverId)
-	// resp = &types.ResponseAppendEntryRPC{
-	// 	Success: true,
-	// }
 	resp.Success = true
-
 	return nil
 }
 
@@ -351,10 +363,11 @@ func (s *Server) redirectRequestToLeader(ctx context.Context, leaderId string, m
 
 func (s *Server) appendRPCEntriesToLogs(req *types.RequestAppendEntryRPC, withLock bool) []logEntry.LogEntry {
 	if withLock {
+		s.logger.Debugw("acquired lock successfully", "serverID", s.serverId)
 		s.serverMu.Lock()
 		defer s.serverMu.Unlock()
 	}
-	s.logger.Debugw("acquired lock successfully", "serverID", s.serverId)
+
 	appendedLogs := make([]logEntry.LogEntry, 0)
 	for _, entry := range req.Entries {
 		log := logEntry.LogEntry{
@@ -365,14 +378,14 @@ func (s *Server) appendRPCEntriesToLogs(req *types.RequestAppendEntryRPC, withLo
 		s.Logs = append(s.Logs, log)
 		appendedLogs = append(appendedLogs, log)
 	}
-	s.LastComittedIndex = len(s.Logs) - 1
+	// s.LastComittedIndex = len(s.Logs) - 1
 	s.logger.Debugw("appended logs successfully", "serverID", s.serverId, "returning last appended log index", len(s.Logs)-1, "current logs", s.Logs)
 	return appendedLogs
 }
 
 func (s *Server) waitTillApply(ctx context.Context, appendedLogs []logEntry.LogEntry) error {
 	// TODO: take this from config
-	tickerDuration := 25 * time.Millisecond
+	tickerDuration := 5 * time.Millisecond
 	waitTillApplyTicker := time.NewTicker(tickerDuration)
 	for {
 		select {
@@ -386,9 +399,8 @@ func (s *Server) waitTillApply(ctx context.Context, appendedLogs []logEntry.LogE
 			s.serverMu.RUnlock()
 
 			lastAppendedLogIndex := appendedLogs[len(appendedLogs)-1].Index
-			if lastAppendedLogIndex < lastAppliedIndex {
-				// continue waiting
-				s.logger.Debugw("waiting till log gets applied", "serverID", s.serverId)
+			if lastAppliedIndex < lastAppendedLogIndex {
+				s.logger.Debugw("waiting till log gets applied", "serverID", s.serverId, "lastAppliedIndex", lastAppliedIndex, "lastAppendedLogIndex", lastAppendedLogIndex)
 				waitTillApplyTicker.Reset(tickerDuration)
 				continue
 			}
@@ -452,45 +464,43 @@ func (s *Server) resetLeaderTicker(d time.Duration, withLock bool) {
 
 func (s *Server) updateLeaderIndexes(resp *types.ResonseProcessRPC, withLock bool) error {
 
+	s.logger.Debugw("updating leader indexes", "serverID", s.serverId)
+	updateAttrs := map[string]interface{}{
+		"NextIndex":  resp.NextIndex,
+		"MatchIndex": resp.MatchIndex,
+	}
+
 	s.serverMu.RLock()
 	logs := s.Logs
 	lastCommitIndex := s.LastComittedIndex
 	currTerm := s.CurrentTerm
 	peers := s.peers
-	matchIndex := s.MatchIndex
 	s.serverMu.RUnlock()
 
-	var updatedCommitIndex int
+	var updatedCommitIndex *int
 	for i := len(logs) - 1; i > lastCommitIndex; i-- {
 		cnt := 0
-		for _, ind := range matchIndex {
+		for _, ind := range resp.MatchIndex {
 			if ind >= i {
 				cnt++
 			}
 		}
-		if cnt > len(peers)/2 && logs[lastCommitIndex].Term == currTerm {
-			updatedCommitIndex = i
+		if cnt > len(peers)/2 && logs[i].Term == currTerm {
+			updatedCommitIndex = &i
 			break
 		}
 	}
 
-	if updatedCommitIndex == 0 {
-		return nil
+	if updatedCommitIndex != nil {
+		updateAttrs["LastComittedIndex"] = *updatedCommitIndex
+		s.logger.Debugw("comitting logs", "serverID", s.serverId, "logs", logs[lastCommitIndex+1:*updatedCommitIndex+1])
+		err := s.serverDb.SaveLogs(logs[lastCommitIndex+1 : *updatedCommitIndex+1])
+		if err != nil {
+			return err
+		}
 	}
 
-	s.logger.Debugw("saving logs", "serverID", s.serverId, "logs", logs[lastCommitIndex+1:updatedCommitIndex+1])
-	err := s.serverDb.SaveLogs(logs[lastCommitIndex+1 : updatedCommitIndex+1])
-	if err != nil {
-		return err
-	}
-
-	updateAttrs := map[string]interface{}{
-		"LastComittedIndex": updatedCommitIndex,
-		"NextIndex":         resp.NextIndex,
-		"MatchIndex":        resp.MatchIndex,
-	}
 	s.update(updateAttrs, nil, withLock)
-
 	s.logger.Debugw("updated leader indexes", "updateAttrs", updateAttrs)
 	return nil
 }

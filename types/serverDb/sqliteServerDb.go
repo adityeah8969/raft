@@ -1,6 +1,10 @@
 package serverdb
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
+
 	"github.com/adityeah8969/raft/config"
 	"github.com/adityeah8969/raft/types"
 	"github.com/adityeah8969/raft/types/logEntry"
@@ -10,6 +14,28 @@ import (
 
 type SqliteServerDb struct {
 	db *gorm.DB
+}
+
+type CommitLog struct {
+	gorm.Model
+	Term  int
+	Index int
+	Entry CommitEntry `gorm:"type:jsonb"`
+}
+
+type CommitEntry map[string]interface{}
+
+func (c CommitEntry) Value() (driver.Value, error) {
+	return json.Marshal(c)
+}
+
+func (c *CommitEntry) Scan(value interface{}) error {
+	b, ok := value.([]byte)
+	if !ok {
+		return errors.New("Scan source is not []byte")
+	}
+
+	return json.Unmarshal(b, &c)
 }
 
 func (s *SqliteServerDb) GetServerDb() (*gorm.DB, error) {
@@ -36,5 +62,13 @@ func (s *SqliteServerDb) SaveVote(vote *types.Vote) error {
 }
 
 func (s *SqliteServerDb) SaveLogs(entries []logEntry.LogEntry) error {
-	return s.db.Model(&logEntry.LogEntry{}).Save(entries).Error
+	entities := make([]*CommitLog, len(entries))
+	for ind, entry := range entries {
+		entities[ind] = &CommitLog{
+			Term:  entry.Term,
+			Index: entry.Term,
+			Entry: entry.Entry.(map[string]interface{}),
+		}
+	}
+	return s.db.Model(&CommitLog{}).Save(entities).Error
 }
